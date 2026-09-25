@@ -48,7 +48,9 @@ import Elm.Syntax.ModuleName exposing (ModuleName)
 import Elm.Syntax.Node as Node exposing (Node(..))
 import Elm.Syntax.Signature exposing (Signature)
 import Elm.Syntax.Type as SyntaxType
+import Elm.Syntax.TypeAlias
 import Elm.Syntax.TypeAnnotation as TypeAnnotation
+import Elm.Syntax.TypeAnnotation.Extra
 import Elm.TypeInference.BindingGroup as BindingGroup
 import Elm.TypeInference.Dependencies as Dependencies exposing (Dependencies)
 import Elm.TypeInference.DependencySources as DependencySources
@@ -304,34 +306,35 @@ inferModules :
         , Project
         )
 inferModules files proj0 =
-    files
-        |> List.foldl
-            (\file ( acc, proj ) ->
-                let
-                    moduleName : ModuleName
-                    moduleName =
-                        FileExtra.moduleName file
-                in
-                case inferModule moduleName proj of
-                    ( Ok table, newProj ) ->
-                        ( { errors = acc.errors
-                          , tables = Dict.insert moduleName table acc.tables
-                          }
-                        , newProj
-                        )
+    let
+        ( tables, errors, inferredProject ) =
+            files
+                |> List.foldl
+                    (\file ( accTables, accErrors, proj ) ->
+                        let
+                            moduleName : ModuleName
+                            moduleName =
+                                FileExtra.moduleName file
+                        in
+                        case inferModule moduleName proj of
+                            ( Ok table, newProj ) ->
+                                ( Dict.insert moduleName table accTables
+                                , accErrors
+                                , newProj
+                                )
 
-                    ( Err err, newProj ) ->
-                        ( { tables = acc.tables
-                          , errors = Dict.insert moduleName err acc.errors
-                          }
-                        , newProj
-                        )
-            )
-            ( { tables = Dict.empty
-              , errors = Dict.empty
-              }
-            , proj0
-            )
+                            ( Err err, newProj ) ->
+                                ( accTables
+                                , Dict.insert moduleName err accErrors
+                                , newProj
+                                )
+                    )
+                    ( Dict.empty
+                    , Dict.empty
+                    , proj0
+                    )
+    in
+    ( { tables = tables, errors = errors }, inferredProject )
 
 
 
@@ -873,17 +876,11 @@ inferModule_ currentPackage depEnv moduleMapping importedInterfaces thisIndex fi
         ctx =
             moduleCtx currentPackage depEnv moduleMapping importedInterfaces thisIndex
     in
-    (State.do (gatherTypeAliases ctx file) <| \outgoingAliases ->
-    let
-        typeAliases : Dict GlobalKey TypeAlias
-        typeAliases =
-            Dict.union outgoingAliases ctx.depTypeAliases
-    in
-    State.do (registerConstructorsAndPorts ctx file) <| \() ->
+    (State.do (gatherTypeAliases ctx file) <| \typeAliases ->
+    State.do (registerConstructorsAndPorts ctx typeAliases file) <| \() ->
     State.do (registerEffectMagic ctx) <| \() ->
     State.do (solveModule ctx typeAliases file) <| \() ->
-    State.do (moduleResult ctx file outgoingAliases) <| \result ->
-    State.pure result
+    moduleResult ctx file typeAliases
     )
         |> State.run (State.init ctx.globalEnv)
         |> Tuple.first
@@ -898,7 +895,7 @@ moduleResult :
             { table : TypeLookupTable
             , interface : ModuleInterface
             }
-moduleResult ctx file outgoingAliases =
+moduleResult ctx file typeAliases =
     State.do State.getNodeIds <| \nodeIds ->
     State.do State.getSubst <| \substitutionMap ->
     State.do State.getGlobalEnv <| \globalEnv ->
@@ -934,7 +931,7 @@ moduleResult ctx file outgoingAliases =
                                                 acc
 
                                             Just declId ->
-                                                case TypeI.fromTypeAnnotation ctx.resolver (Node.value sigNode.typeAnnotation) of
+                                                case TypeI.fromTypeAnnotation ctx.resolver typeAliases (Node.value sigNode.typeAnnotation) of
                                                     Err _ ->
                                                         acc
 
@@ -959,7 +956,16 @@ moduleResult ctx file outgoingAliases =
         , interface =
             { moduleIndex = ctx.thisIndex
             , values = exposedValues
-            , typeAliases = outgoingAliases
+            , typeAliases =
+                -- TODO this is quiite scuffed.
+                -- It may be nicer (and faster) to instead pass
+                -- outgoing and depTypeAliases separately to TypeI.fromTypeAnnotation
+                typeAliases
+                    |> Dict.filter
+                        (\( moduleId, _, _ ) _ ->
+                            ModuleIds.equal moduleId ctx.thisIndex.moduleId
+                        )
+                    |> Debug.log "interface.typeAliases"
             }
         }
 
@@ -1085,12 +1091,40 @@ gatherTypeAliases ctx file =
         moduleId : ModuleId
         moduleId =
             ctx.thisIndex.moduleId
+
+        fileTypeAliases : Dict String Elm.Syntax.TypeAlias.TypeAlias
+        fileTypeAliases =
+            file.declarations
+                |> List.foldl
+                    (\node acc ->
+                        case Node.value node of
+                            Declaration.AliasDeclaration alias_ ->
+                                Dict.insert (Node.value alias_.name) alias_ acc
+
+                            _ ->
+                                acc
+                    )
+                    Dict.empty
     in
-    file.declarations
+    SCC.stronglyConnectedComponents
+        (fileTypeAliases |> Dict.keys)
+        (\node ->
+            case Dict.get node fileTypeAliases of
+                Nothing ->
+                    []
+
+                Just alias_ ->
+                    Elm.Syntax.TypeAnnotation.Extra.referencesToTypesFromModuleId
+                        resolver
+                        moduleId
+                        (Node.value alias_.typeAnnotation)
+        )
+        -- TODO instead foldl on nested lists
+        |> List.concat
         |> State.foldl
-            (\(Node _ declarationNode) accAcrossDeclarations ->
-                case declarationNode of
-                    Declaration.AliasDeclaration typeAlias ->
+            (\node dict ->
+                case Dict.get node fileTypeAliases of
+                    Just typeAlias ->
                         let
                             toError : ErrorDetails -> Error
                             toError details =
@@ -1098,78 +1132,77 @@ gatherTypeAliases ctx file =
                                 , declarationNames = [ Node.value typeAlias.name ]
                                 , details = details
                                 }
-
-                            type_ : StateM MonoType
-                            type_ =
-                                case
-                                    typeAlias.typeAnnotation
-                                        |> Node.value
-                                        |> TypeI.fromTypeAnnotation resolver
-                                of
-                                    Err fromTypeAnnotationError ->
-                                        State.error (toError (TypeI.fromTypeAnnotationError fromTypeAnnotationError))
-
-                                    Ok aliasedType ->
-                                        State.pure aliasedType
-
-                            -- A record type alias also gets a constructor function
-                            -- (eg. `type alias Foo = { a : Int }` lets you write `Foo 1`).
-                            registerConstructor : MonoType -> StateM ()
-                            registerConstructor aliasMono =
-                                case Node.value typeAlias.typeAnnotation of
-                                    TypeAnnotation.Record fields ->
-                                        fields
-                                            |> State.traverseFastAndReverse
-                                                (\(Node _ ( _, Node _ fieldType )) ->
-                                                    case TypeI.fromTypeAnnotation resolver fieldType of
-                                                        Err fromTypeAnnotationError ->
-                                                            State.error (toError (TypeI.fromTypeAnnotationError fromTypeAnnotationError))
-
-                                                        Ok fieldValueType ->
-                                                            State.pure fieldValueType
-                                                )
-                                            |> State.map
-                                                (\fieldTypesReverse ->
-                                                    fieldTypesReverse
-                                                        |> List.foldl (\fieldT acc -> Function { from = fieldT, to = acc }) aliasMono
-                                                )
-                                            |> State.andThen
-                                                (\ctorType ->
-                                                    State.addGlobalBinding
-                                                        ( moduleId, "", Node.value typeAlias.name )
-                                                        (TypeI.closeOver ctorType)
-                                                )
-
-                                    _ ->
-                                        State.pureUnit
                         in
-                        State.do type_ <| \type__ ->
-                        State.do (registerConstructor type__) <| \() ->
-                        State.pure <|
-                            Dict.insert
-                                ( moduleId, "", Node.value typeAlias.name )
-                                { args = List.map (\(Node.Node _ generic) -> TypeVar.parse generic) typeAlias.generics
-                                , type_ = type__
-                                }
-                                accAcrossDeclarations
+                        case
+                            typeAlias.typeAnnotation
+                                |> Node.value
+                                |> TypeI.fromTypeAnnotation resolver dict
+                        of
+                            Err fromTypeAnnotationError ->
+                                State.error (toError (TypeI.fromTypeAnnotationError fromTypeAnnotationError))
 
-                    _ ->
-                        State.pure accAcrossDeclarations
+                            Ok type__ ->
+                                let
+                                    -- A record type alias also gets a constructor function
+                                    -- (eg. `type alias Foo = { a : Int }` lets you write `Foo 1`).
+                                    registerConstructor : MonoType -> StateM ()
+                                    registerConstructor aliasMono =
+                                        case Node.value typeAlias.typeAnnotation of
+                                            TypeAnnotation.Record fields ->
+                                                fields
+                                                    |> Result.Extra.foldlWhileOk
+                                                        (\(Node _ ( _, Node _ fieldType )) acc ->
+                                                            case TypeI.fromTypeAnnotation resolver dict fieldType of
+                                                                Err fromTypeAnnotationError ->
+                                                                    Err (toError (TypeI.fromTypeAnnotationError fromTypeAnnotationError))
+
+                                                                Ok fieldValueType ->
+                                                                    Ok (fieldValueType :: acc)
+                                                        )
+                                                        []
+                                                    |> State.fromResult
+                                                    |> State.andThen
+                                                        (\fieldTypesReverse ->
+                                                            let
+                                                                ctorType : MonoType
+                                                                ctorType =
+                                                                    fieldTypesReverse
+                                                                        |> List.foldl (\fieldT acc -> Function { from = fieldT, to = acc }) aliasMono
+                                                            in
+                                                            State.addGlobalBinding
+                                                                ( moduleId, "", Node.value typeAlias.name )
+                                                                (TypeI.closeOver ctorType)
+                                                        )
+
+                                            _ ->
+                                                State.pureUnit
+                                in
+                                State.do (registerConstructor type__) <| \() ->
+                                State.pure <|
+                                    Dict.insert
+                                        ( moduleId, "", Node.value typeAlias.name )
+                                        { args = List.map (\(Node.Node _ generic) -> TypeVar.parse generic) typeAlias.generics
+                                        , type_ = type__
+                                        }
+                                        dict
+
+                    Nothing ->
+                        State.pure dict
             )
-            ctx.inheritedAliases
+            (Dict.union ctx.inheritedAliases ctx.depTypeAliases)
 
 
-registerConstructorsAndPorts : ModuleCtx -> File -> StateM ()
-registerConstructorsAndPorts ctx file =
+registerConstructorsAndPorts : ModuleCtx -> Dict GlobalKey TypeAlias -> File -> StateM ()
+registerConstructorsAndPorts ctx typeAliases file =
     file.declarations
         |> State.traverseUnit
             (\(Node _ declNode) ->
                 case declNode of
                     Declaration.CustomTypeDeclaration customType ->
-                        registerCustomType ctx.resolver ctx.thisIndex.moduleId ctx.thisIndex.moduleName customType
+                        registerCustomType ctx.resolver typeAliases ctx.thisIndex.moduleId ctx.thisIndex.moduleName customType
 
                     Declaration.PortDeclaration sig ->
-                        registerPort ctx.resolver ctx.thisIndex.moduleId ctx.thisIndex.moduleName sig
+                        registerPort ctx.resolver typeAliases ctx.thisIndex.moduleId ctx.thisIndex.moduleName sig
 
                     _ ->
                         State.pureUnit
@@ -1178,11 +1211,12 @@ registerConstructorsAndPorts ctx file =
 
 registerCustomType :
     TypeResolver
+    -> Dict GlobalKey TypeAlias
     -> ModuleId
     -> FullModuleName
     -> SyntaxType.Type
     -> StateM ()
-registerCustomType resolver moduleId moduleName customType =
+registerCustomType resolver typeAliases moduleId moduleName customType =
     let
         typeName : String
         typeName =
@@ -1211,7 +1245,7 @@ registerCustomType resolver moduleId moduleName customType =
                     argTypes =
                         arguments
                             |> Result.Extra.combineMap
-                                (\(Node.Node _ arg) -> TypeI.fromTypeAnnotation resolver arg)
+                                (\(Node.Node _ arg) -> TypeI.fromTypeAnnotation resolver typeAliases arg)
                 in
                 case argTypes of
                     Err fromTypeAnnotationError ->
@@ -1231,11 +1265,17 @@ registerCustomType resolver moduleId moduleName customType =
             )
 
 
-registerPort : TypeResolver -> ModuleId -> FullModuleName -> Signature -> StateM ()
-registerPort resolver moduleId moduleName sig =
+registerPort :
+    TypeResolver
+    -> Dict GlobalKey TypeAlias
+    -> ModuleId
+    -> FullModuleName
+    -> Signature
+    -> StateM ()
+registerPort resolver typeAliases moduleId moduleName sig =
     sig.typeAnnotation
         |> Node.value
-        |> TypeI.fromTypeAnnotation resolver
+        |> TypeI.fromTypeAnnotation resolver typeAliases
         |> Result.mapError
             (\fromTypeAnnotationError ->
                 State.error

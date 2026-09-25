@@ -15,6 +15,7 @@ import Elm.TypeInference.TypeVar as TypeVar
         , TypeVar
         , TypeVarStyle(..)
         )
+import List.ExtraExtra
 
 
 type alias TypeAlias =
@@ -80,329 +81,6 @@ unifyManyHelp cfg eqs state =
                     unifyManyHelp cfg rest newState
 
 
-{-| Expand alias (substitute its args) recursively, then collapse extensible records.
-
-There is a possibility of infinite cycles. We use `fuel` to stop the expansion
-after a while and provide a type mismatch instead of a hang.
-
-Intentionally shallow to preserve inferred types to be as high-level (aliases)
-as possible, instead of the low-level records underneath.
-Full expansion only happens in error reporting.
-
--}
-expandAlias : TypeAliases -> MonoType -> MonoType
-expandAlias typeAliases type_ =
-    case expandAliasHelp maxAliasDepth typeAliases type_ of
-        ExtensibleRecord extensibleRecordUncollapsed ->
-            TypeI.collapseExtensible extensibleRecordUncollapsed
-
-        notExtensibleRecord ->
-            notExtensibleRecord
-
-
-{-| This should be enough (any real alias chain like that should be
-unreadable/unusable in real code).
--}
-maxAliasDepth : Int
-maxAliasDepth =
-    1000
-
-
-expandAliasHelp : Int -> TypeAliases -> MonoType -> MonoType
-expandAliasHelp fuel typeAliases type_ =
-    case type_ of
-        UserDefinedType ut ->
-            if fuel <= 0 then
-                type_
-
-            else
-                case Dict.get ( ut.moduleId, ut.package, ut.name ) typeAliases of
-                    Nothing ->
-                        type_
-
-                    Just alias_ ->
-                        case zipAliasArgs alias_.args ut.args of
-                            {- Imagine:
-
-                               type alias Pair first second =
-                                   ( first, second )
-
-                               x : Pair Int
-                               x = ( 1, "oops" )
-
-                            -}
-                            Nothing ->
-                                type_
-
-                            Just mappings ->
-                                expandAliasHelp (fuel - 1) typeAliases (substituteAliasArgs mappings alias_.type_)
-
-        ExtensibleRecord r ->
-            if fuel <= 0 then
-                type_
-
-            else
-                TypeI.collapseExtensible
-                    { extensionTypevar = expandAliasHelp (fuel - 1) typeAliases r.extensionTypevar
-                    , fields = r.fields
-                    }
-
-        _ ->
-            type_
-
-
-{-| Expand nested record aliases for error display.
-
-(Unification is shallow to allow inferred types to be shown as the high-level
-aliases instead of as the low-level records underneath them).
-
--}
-expandAliasDeep : TypeAliases -> MonoType -> MonoType
-expandAliasDeep typeAliases type_ =
-    case expandAliasDeepHelp maxAliasDepth typeAliases type_ of
-        ExtensibleRecord extensibleRecordUncollapsed ->
-            TypeI.collapseExtensible extensibleRecordUncollapsed
-
-        notExtensibleRecord ->
-            notExtensibleRecord
-
-
-expandAliasDeepHelp : Int -> TypeAliases -> MonoType -> MonoType
-expandAliasDeepHelp fuel typeAliases type_ =
-    case type_ of
-        UserDefinedType ut ->
-            if fuel <= 0 then
-                expandDeepChildren fuel typeAliases type_
-
-            else
-                case Dict.get ( ut.moduleId, ut.package, ut.name ) typeAliases of
-                    Nothing ->
-                        expandDeepChildren fuel typeAliases type_
-
-                    Just alias_ ->
-                        case zipAliasArgs alias_.args ut.args of
-                            Nothing ->
-                                expandDeepChildren fuel typeAliases type_
-
-                            Just mappings ->
-                                expandAliasDeepHelp (fuel - 1) typeAliases (substituteAliasArgs mappings alias_.type_)
-
-        _ ->
-            expandDeepChildren fuel typeAliases type_
-
-
-{-| Expand aliases fully. Fuel counts depth instead of breadth.
--}
-expandDeepChildren : Int -> TypeAliases -> MonoType -> MonoType
-expandDeepChildren fuel typeAliases type_ =
-    case type_ of
-        TypeI.TypeVar _ ->
-            type_
-
-        TypeI.Function f ->
-            TypeI.Function
-                { from = expandAliasDeepHelp fuel typeAliases f.from
-                , to = expandAliasDeepHelp fuel typeAliases f.to
-                }
-
-        TypeI.Int ->
-            type_
-
-        TypeI.Float ->
-            type_
-
-        TypeI.Char ->
-            type_
-
-        TypeI.String ->
-            type_
-
-        TypeI.Bool ->
-            type_
-
-        TypeI.List listItemType ->
-            TypeI.List (expandAliasDeepHelp fuel typeAliases listItemType)
-
-        TypeI.Unit ->
-            type_
-
-        TypeI.Tuple2 t1 t2 ->
-            TypeI.Tuple2
-                (expandAliasDeepHelp fuel typeAliases t1)
-                (expandAliasDeepHelp fuel typeAliases t2)
-
-        TypeI.Tuple3 t1 t2 t3 ->
-            TypeI.Tuple3
-                (expandAliasDeepHelp fuel typeAliases t1)
-                (expandAliasDeepHelp fuel typeAliases t2)
-                (expandAliasDeepHelp fuel typeAliases t3)
-
-        TypeI.Record rFields ->
-            TypeI.Record
-                (Dict.map (\_ v -> expandAliasDeepHelp fuel typeAliases v) rFields)
-
-        TypeI.ExtensibleRecord r ->
-            TypeI.ExtensibleRecord
-                { extensionTypevar = expandAliasDeepHelp fuel typeAliases r.extensionTypevar
-                , fields = Dict.map (\_ v -> expandAliasDeepHelp fuel typeAliases v) r.fields
-                }
-
-        TypeI.UserDefinedType r ->
-            TypeI.UserDefinedType
-                { package = r.package
-                , moduleId = r.moduleId
-                , name = r.name
-                , args = List.map (\arg -> expandAliasDeepHelp fuel typeAliases arg) r.args
-                }
-
-        TypeI.WebGLShader r ->
-            TypeI.WebGLShader
-                { attributesExtension = expandAliasDeepHelp fuel typeAliases r.attributesExtension
-                , attributes = Dict.map (\_ v -> expandAliasDeepHelp fuel typeAliases v) r.attributes
-                , uniformsExtension = expandAliasDeepHelp fuel typeAliases r.uniformsExtension
-                , uniforms = Dict.map (\_ v -> expandAliasDeepHelp fuel typeAliases v) r.uniforms
-                , varyingsExtension = expandAliasDeepHelp fuel typeAliases r.varyingsExtension
-                , varyings = Dict.map (\_ v -> expandAliasDeepHelp fuel typeAliases v) r.varyings
-                }
-
-
-{-| Replace type alias' arguments with the supplied types, verbatim.
--}
-substituteAliasArgs : List ( TypeVar, MonoType ) -> MonoType -> MonoType
-substituteAliasArgs mappings type_ =
-    case type_ of
-        TypeVar v ->
-            findAliasArg v mappings
-                |> Maybe.withDefault type_
-
-        -- The rest is recursion
-        Function f ->
-            Function
-                { from = substituteAliasArgs mappings f.from
-                , to = substituteAliasArgs mappings f.to
-                }
-
-        Int ->
-            type_
-
-        Float ->
-            type_
-
-        Char ->
-            type_
-
-        String ->
-            type_
-
-        Bool ->
-            type_
-
-        List listItemType ->
-            List (substituteAliasArgs mappings listItemType)
-
-        Unit ->
-            type_
-
-        Tuple2 t1 t2 ->
-            Tuple2 (substituteAliasArgs mappings t1) (substituteAliasArgs mappings t2)
-
-        Tuple3 t1 t2 t3 ->
-            Tuple3
-                (substituteAliasArgs mappings t1)
-                (substituteAliasArgs mappings t2)
-                (substituteAliasArgs mappings t3)
-
-        Record fields ->
-            Record (Dict.map (\_ v -> substituteAliasArgs mappings v) fields)
-
-        ExtensibleRecord r ->
-            ExtensibleRecord
-                { extensionTypevar = substituteAliasArgs mappings r.extensionTypevar
-                , fields = Dict.map (\_ v -> substituteAliasArgs mappings v) r.fields
-                }
-
-        UserDefinedType r ->
-            UserDefinedType
-                { package = r.package
-                , moduleId = r.moduleId
-                , name = r.name
-                , args = List.map (\arg -> substituteAliasArgs mappings arg) r.args
-                }
-
-        WebGLShader r ->
-            WebGLShader
-                { attributesExtension = substituteAliasArgs mappings r.attributesExtension
-                , attributes = Dict.map (\_ v -> substituteAliasArgs mappings v) r.attributes
-                , uniformsExtension = substituteAliasArgs mappings r.uniformsExtension
-                , uniforms = Dict.map (\_ v -> substituteAliasArgs mappings v) r.uniforms
-                , varyingsExtension = substituteAliasArgs mappings r.varyingsExtension
-                , varyings = Dict.map (\_ v -> substituteAliasArgs mappings v) r.varyings
-                }
-
-
-{-| Find the var in the alias argument list.
-List deemed acceptable (aliases don't have many arguments).
--}
-findAliasArg : TypeVar -> List ( TypeVar, MonoType ) -> Maybe MonoType
-findAliasArg needle mappings =
-    case mappings of
-        [] ->
-            Nothing
-
-        ( param, argType ) :: rest ->
-            if TypeVar.equal param needle then
-                Just argType
-
-            else
-                findAliasArg needle rest
-
-
-zipAliasArgs : List TypeVar -> List MonoType -> Maybe (List ( TypeVar, MonoType ))
-zipAliasArgs params args =
-    case params of
-        [] ->
-            case args of
-                [] ->
-                    Just []
-
-                _ :: _ ->
-                    Nothing
-
-        param :: restParams ->
-            case args of
-                argType :: restArgs ->
-                    zipAliasArgs restParams restArgs
-                        |> Maybe.map (\restZipped -> ( param, argType ) :: restZipped)
-
-                [] ->
-                    Nothing
-
-
-zipArgs : List MonoType -> List MonoType -> Maybe (List ( MonoType, MonoType ))
-zipArgs args1 args2 =
-    case args1 of
-        [] ->
-            case args2 of
-                [] ->
-                    Just []
-
-                _ :: _ ->
-                    Nothing
-
-        a1 :: rest1 ->
-            case args2 of
-                a2 :: rest2 ->
-                    case zipArgs rest1 rest2 of
-                        Just lst ->
-                            Just (( a1, a2 ) :: lst)
-
-                        Nothing ->
-                            Nothing
-
-                [] ->
-                    Nothing
-
-
 {-| Pair the two record field dicts up _by name_.
 `Nothing` if the key sets differ at all.
 -}
@@ -417,102 +95,13 @@ zipRecordFields bindings1 bindings2 =
         (Just [])
 
 
-{-| A `Shader` annotation can mention a type alias:
-
-    type alias Vertex =
-        { position : Vec2 }
-
-    shader : Shader Vertex { view : Mat4 } { vcoord : Vec2 }
-
-`fromTypeAnnotation` can't expand that alias (it doesn't know them yet).
-Expand the args and retry the collapse here, where aliases are known.
-
--}
-collapseNamedShader : TypeAliases -> MonoType -> MonoType
-collapseNamedShader typeAliases type_ =
-    case type_ of
-        UserDefinedType ut ->
-            case TypeI.collapsePrimitive ut.package ut.moduleId ut.name (List.map (\arg -> expandAlias typeAliases arg) ut.args) of
-                Just collapsed ->
-                    collapsed
-
-                Nothing ->
-                    type_
-
-        _ ->
-            type_
-
-
-shallowEqual : MonoType -> MonoType -> Bool
-shallowEqual t1 t2 =
-    case t1 of
-        TypeVar v1 ->
-            case t2 of
-                TypeVar v2 ->
-                    TypeVar.equal v1 v2
-
-                _ ->
-                    False
-
-        Int ->
-            case t2 of
-                Int ->
-                    True
-
-                _ ->
-                    False
-
-        Float ->
-            case t2 of
-                Float ->
-                    True
-
-                _ ->
-                    False
-
-        Char ->
-            case t2 of
-                Char ->
-                    True
-
-                _ ->
-                    False
-
-        String ->
-            case t2 of
-                String ->
-                    True
-
-                _ ->
-                    False
-
-        Bool ->
-            case t2 of
-                Bool ->
-                    True
-
-                _ ->
-                    False
-
-        Unit ->
-            case t2 of
-                Unit ->
-                    True
-
-                _ ->
-                    False
-
-        _ ->
-            False
-
-
 typeMismatch : UnifyConfig -> MonoType -> MonoType -> StateM ()
 typeMismatch cfg t1 t2 =
     let
         ( pubT1, pubT2 ) =
             TypeI.normalizeAndToPublicPair cfg.moduleMapping
-                (expandAliasDeep cfg.typeAliases t1)
-                (expandAliasDeep cfg.typeAliases t2)
+                (TypeI.expandAliasDeep cfg.typeAliases t1)
+                (TypeI.expandAliasDeep cfg.typeAliases t2)
     in
     State.error
         { moduleName = FullModuleName.toModuleName cfg.moduleName
@@ -542,7 +131,7 @@ unifyRecordVsExtensible :
         }
     -> StateM ()
 unifyRecordVsExtensible cfg t1 t2 recordFields er =
-    case expandAlias cfg.typeAliases er.extensionTypevar of
+    case er.extensionTypevar of
         Record extFields ->
             let
                 overlapEqs : List ( MonoType, MonoType )
@@ -620,388 +209,377 @@ unifyRecordVsExtensible cfg t1 t2 recordFields er =
 
 
 unifyMono : UnifyConfig -> MonoType -> MonoType -> StateM ()
-unifyMono cfg rawT1 rawT2 =
-    -- `shallowEqual` is a cheap fast check; `==` calls `_Utils_eq` and short-circuits on `===`
-    if shallowEqual rawT1 rawT2 || rawT1 == rawT2 then
-        State.pureUnit
+unifyMono cfg t1 t2 =
+    case t1 of
+        TypeVar v ->
+            bind cfg v t2
 
-    else
-        let
-            t1 : MonoType
-            t1 =
-                expandAlias cfg.typeAliases rawT1
-                    |> collapseNamedShader cfg.typeAliases
+        Int ->
+            case t2 of
+                TypeVar v ->
+                    bind cfg v t1
 
-            t2 : MonoType
-            t2 =
-                expandAlias cfg.typeAliases rawT2
-                    |> collapseNamedShader cfg.typeAliases
-        in
-        case t1 of
-            TypeVar v ->
-                bind cfg v t2
+                Int ->
+                    -- no substitution needed
+                    State.pureUnit
 
-            Int ->
-                case t2 of
-                    TypeVar v ->
-                        bind cfg v t1
+                _ ->
+                    typeMismatch cfg t1 t2
 
-                    Int ->
-                        -- no substitution needed
-                        State.pureUnit
+        Float ->
+            case t2 of
+                TypeVar v ->
+                    bind cfg v t1
 
-                    _ ->
-                        typeMismatch cfg t1 t2
+                Float ->
+                    -- no substitution needed
+                    State.pureUnit
 
-            Float ->
-                case t2 of
-                    TypeVar v ->
-                        bind cfg v t1
+                _ ->
+                    typeMismatch cfg t1 t2
 
-                    Float ->
-                        -- no substitution needed
-                        State.pureUnit
+        String ->
+            case t2 of
+                TypeVar v ->
+                    bind cfg v t1
 
-                    _ ->
-                        typeMismatch cfg t1 t2
+                String ->
+                    -- no substitution needed
+                    State.pureUnit
 
-            String ->
-                case t2 of
-                    TypeVar v ->
-                        bind cfg v t1
+                _ ->
+                    typeMismatch cfg t1 t2
 
-                    String ->
-                        -- no substitution needed
-                        State.pureUnit
+        Char ->
+            case t2 of
+                TypeVar v ->
+                    bind cfg v t1
 
-                    _ ->
-                        typeMismatch cfg t1 t2
+                Char ->
+                    -- no substitution needed
+                    State.pureUnit
 
-            Char ->
-                case t2 of
-                    TypeVar v ->
-                        bind cfg v t1
+                _ ->
+                    typeMismatch cfg t1 t2
 
-                    Char ->
-                        -- no substitution needed
-                        State.pureUnit
+        Bool ->
+            case t2 of
+                TypeVar v ->
+                    bind cfg v t1
 
-                    _ ->
-                        typeMismatch cfg t1 t2
+                Bool ->
+                    -- no substitution needed
+                    State.pureUnit
 
-            Bool ->
-                case t2 of
-                    TypeVar v ->
-                        bind cfg v t1
+                _ ->
+                    typeMismatch cfg t1 t2
 
-                    Bool ->
-                        -- no substitution needed
-                        State.pureUnit
+        Unit ->
+            case t2 of
+                TypeVar v ->
+                    bind cfg v t1
 
-                    _ ->
-                        typeMismatch cfg t1 t2
+                Unit ->
+                    -- no substitution needed
+                    State.pureUnit
 
-            Unit ->
-                case t2 of
-                    TypeVar v ->
-                        bind cfg v t1
+                _ ->
+                    typeMismatch cfg t1 t2
 
-                    Unit ->
-                        -- no substitution needed
-                        State.pureUnit
+        Function a ->
+            case t2 of
+                TypeVar v ->
+                    bind cfg v t1
 
-                    _ ->
-                        typeMismatch cfg t1 t2
+                Function b ->
+                    unifyMany
+                        cfg
+                        [ ( a.from, b.from )
+                        , ( a.to, b.to )
+                        ]
 
-            Function a ->
-                case t2 of
-                    TypeVar v ->
-                        bind cfg v t1
+                _ ->
+                    typeMismatch cfg t1 t2
 
-                    Function b ->
-                        unifyMany
-                            cfg
-                            [ ( a.from, b.from )
-                            , ( a.to, b.to )
-                            ]
+        List list1 ->
+            case t2 of
+                TypeVar v ->
+                    bind cfg v t1
 
-                    _ ->
-                        typeMismatch cfg t1 t2
+                List list2 ->
+                    unifyMono cfg list1 list2
 
-            List list1 ->
-                case t2 of
-                    TypeVar v ->
-                        bind cfg v t1
+                _ ->
+                    typeMismatch cfg t1 t2
 
-                    List list2 ->
-                        unifyMany cfg [ ( list1, list2 ) ]
+        Tuple2 t1e1 t1e2 ->
+            case t2 of
+                TypeVar v ->
+                    bind cfg v t1
 
-                    _ ->
-                        typeMismatch cfg t1 t2
+                Tuple2 t2e1 t2e2 ->
+                    unifyMany
+                        cfg
+                        [ ( t1e1, t2e1 )
+                        , ( t1e2, t2e2 )
+                        ]
 
-            Tuple2 t1e1 t1e2 ->
-                case t2 of
-                    TypeVar v ->
-                        bind cfg v t1
+                _ ->
+                    typeMismatch cfg t1 t2
 
-                    Tuple2 t2e1 t2e2 ->
-                        unifyMany
-                            cfg
-                            [ ( t1e1, t2e1 )
-                            , ( t1e2, t2e2 )
-                            ]
+        Tuple3 t1e1 t1e2 t1e3 ->
+            case t2 of
+                TypeVar v ->
+                    bind cfg v t1
 
-                    _ ->
-                        typeMismatch cfg t1 t2
+                Tuple3 t2e1 t2e2 t2e3 ->
+                    unifyMany
+                        cfg
+                        [ ( t1e1, t2e1 )
+                        , ( t1e2, t2e2 )
+                        , ( t1e3, t2e3 )
+                        ]
 
-            Tuple3 t1e1 t1e2 t1e3 ->
-                case t2 of
-                    TypeVar v ->
-                        bind cfg v t1
+                _ ->
+                    typeMismatch cfg t1 t2
 
-                    Tuple3 t2e1 t2e2 t2e3 ->
-                        unifyMany
-                            cfg
-                            [ ( t1e1, t2e1 )
-                            , ( t1e2, t2e2 )
-                            , ( t1e3, t2e3 )
-                            ]
+        Record r1Fields ->
+            case t2 of
+                TypeVar v ->
+                    bind cfg v t1
 
-                    _ ->
-                        typeMismatch cfg t1 t2
+                Record r2Fields ->
+                    recordBindings cfg t1 t2 r1Fields r2Fields
 
-            Record r1Fields ->
-                case t2 of
-                    TypeVar v ->
-                        bind cfg v t1
+                ExtensibleRecord r2 ->
+                    unifyRecordVsExtensible cfg t1 t2 r1Fields r2
 
-                    Record r2Fields ->
-                        recordBindings cfg t1 t2 r1Fields r2Fields
+                _ ->
+                    typeMismatch cfg t1 t2
 
-                    ExtensibleRecord er2 ->
-                        unifyRecordVsExtensible cfg t1 t2 r1Fields er2
+        ExtensibleRecord r1 ->
+            case t2 of
+                TypeVar v ->
+                    bind cfg v t1
 
-                    _ ->
-                        typeMismatch cfg t1 t2
+                ExtensibleRecord r2 ->
+                    {- Fields that only one side mentions must be added to the other
+                       side's required fields.
+                       Both sides' extension typevars (the r in { r | ... })
+                       now need to be the same var.
 
-            ExtensibleRecord r1 ->
-                case t2 of
-                    TypeVar v ->
-                        bind cfg v t1
-
-                    ExtensibleRecord r2 ->
-                        {- Fields that only one side mentions must be added to the other
-                           side's required fields.
-                           Both sides' extension typevars (the r in { r | ... })
-                           now need to be the same var.
-
-                           ie.
-                           - getX : { row1 | x : Float } -> Float
-                           - getY : { row2 | y : Float } -> Float
-                           - sum r = getX r + getY r
-                           Use them both on the same record and you get
-                           - sum : { commonVar | x : Float, y : Float } -> Float
-                        -}
-                        let
-                            ( onlyIn1, onlyIn2, sharedEqs ) =
-                                Dict.merge
-                                    (\k v ( o1, o2, eqs ) ->
-                                        ( Dict.insert k v o1
-                                        , o2
-                                        , eqs
-                                        )
+                       ie.
+                       - getX : { row1 | x : Float } -> Float
+                       - getY : { row2 | y : Float } -> Float
+                       - sum r = getX r + getY r
+                       Use them both on the same record and you get
+                       - sum : { commonVar | x : Float, y : Float } -> Float
+                    -}
+                    let
+                        ( onlyIn1, onlyIn2, sharedEqs ) =
+                            Dict.merge
+                                (\k v ( o1, o2, eqs ) ->
+                                    ( Dict.insert k v o1
+                                    , o2
+                                    , eqs
                                     )
-                                    (\_ v1 v2 ( o1, o2, eqs ) ->
-                                        ( o1
-                                        , o2
-                                        , ( v1, v2 ) :: eqs
-                                        )
-                                    )
-                                    (\k v ( o1, o2, eqs ) ->
-                                        ( o1
-                                        , Dict.insert k v o2
-                                        , eqs
-                                        )
-                                    )
-                                    r1.fields
-                                    r2.fields
-                                    ( Dict.empty, Dict.empty, [] )
-                        in
-                        if Dict.isEmpty onlyIn1 && Dict.isEmpty onlyIn2 then
-                            {- Same field set on both sides -> the `r` in `{r | ...}`
-                               must be the same for both sides.
-                            -}
-                            unifyMany cfg (( r1.extensionTypevar, r2.extensionTypevar ) :: sharedEqs)
-
-                        else
-                            State.do State.getNextIdAndTick <| \tailId ->
-                            let
-                                tail : MonoType
-                                tail =
-                                    TypeI.id_ tailId
-                            in
-                            unifyMany
-                                cfg
-                                (( r1.extensionTypevar
-                                 , ExtensibleRecord
-                                    { extensionTypevar = tail
-                                    , fields = onlyIn2
-                                    }
-                                 )
-                                    :: ( r2.extensionTypevar
-                                       , ExtensibleRecord
-                                            { extensionTypevar = tail
-                                            , fields = onlyIn1
-                                            }
-                                       )
-                                    :: sharedEqs
                                 )
+                                (\_ v1 v2 ( o1, o2, eqs ) ->
+                                    ( o1
+                                    , o2
+                                    , ( v1, v2 ) :: eqs
+                                    )
+                                )
+                                (\k v ( o1, o2, eqs ) ->
+                                    ( o1
+                                    , Dict.insert k v o2
+                                    , eqs
+                                    )
+                                )
+                                r1.fields
+                                r2.fields
+                                ( Dict.empty, Dict.empty, [] )
+                    in
+                    if Dict.isEmpty onlyIn1 && Dict.isEmpty onlyIn2 then
+                        {- Same field set on both sides -> the `r` in `{r | ...}`
+                           must be the same for both sides.
+                        -}
+                        unifyMany cfg (( r1.extensionTypevar, r2.extensionTypevar ) :: sharedEqs)
 
-                    Record r2Fields ->
-                        unifyRecordVsExtensible cfg t1 t2 r2Fields r1
+                    else
+                        State.do State.getNextIdAndTick <| \tailId ->
+                        let
+                            tail : MonoType
+                            tail =
+                                TypeI.id_ tailId
+                        in
+                        unifyMany
+                            cfg
+                            (( r1.extensionTypevar
+                             , ExtensibleRecord
+                                { extensionTypevar = tail
+                                , fields = onlyIn2
+                                }
+                             )
+                                :: ( r2.extensionTypevar
+                                   , ExtensibleRecord
+                                        { extensionTypevar = tail
+                                        , fields = onlyIn1
+                                        }
+                                   )
+                                :: sharedEqs
+                            )
 
-                    _ ->
-                        typeMismatch cfg t1 t2
+                Record r2Fields ->
+                    unifyRecordVsExtensible cfg t1 t2 r2Fields r1
 
-            UserDefinedType ut1 ->
-                case t2 of
-                    TypeVar v ->
-                        bind cfg v t1
+                _ ->
+                    typeMismatch cfg t1 t2
 
-                    UserDefinedType ut2 ->
-                        if
-                            (ut1.package /= ut2.package)
-                                || ModuleIds.notEqual ut1.moduleId ut2.moduleId
-                                || (ut1.name /= ut2.name)
-                        then
+        UserDefinedType ut1Raw ->
+            case TypeI.userDefinedTypeExpandAliasAndCollapse cfg.typeAliases ut1Raw of
+                (UserDefinedType ut1) as t1Expanded ->
+                    case TypeI.expandAliasAndCollapse cfg.typeAliases t2 of
+                        TypeVar v ->
+                            bind cfg v t1Expanded
+
+                        UserDefinedType ut2 ->
+                            if
+                                (ut1.package /= ut2.package)
+                                    || ModuleIds.notEqual ut1.moduleId ut2.moduleId
+                                    || (ut1.name /= ut2.name)
+                            then
+                                typeMismatch cfg t1 t2
+
+                            else
+                                case List.ExtraExtra.map2OrNothingIfLengthsDiffer ut1.args ut2.args of
+                                    Nothing ->
+                                        typeMismatch cfg t1 t2
+
+                                    Just eqs ->
+                                        unifyMany cfg eqs
+
+                        _ ->
                             typeMismatch cfg t1 t2
 
-                        else
-                            case zipArgs ut1.args ut2.args of
-                                Nothing ->
-                                    typeMismatch cfg t1 t2
+                t1Expanded ->
+                    unifyMono cfg t1Expanded t2
 
-                                Just eqs ->
-                                    unifyMany cfg eqs
+        WebGLShader webgl1 ->
+            case t2 of
+                TypeVar v ->
+                    bind cfg v t1
 
-                    _ ->
-                        typeMismatch cfg t1 t2
+                WebGLShader webgl2 ->
+                    let
+                        {- Unify one of a shader's attribute/uniform/varying sets.
 
-            WebGLShader webgl1 ->
-                case t2 of
-                    TypeVar v ->
-                        bind cfg v t1
+                           Shader sets are special: the GLSL literal opens them, and a type
+                           annotation can narrow them down to a closed record. So a closed
+                           side only requires that its fields are present (with matching
+                           types) in the other side; the open side absorbs the difference.
+                           Two closed sides still have to agree on the field set.
+                        -}
+                        webglSet :
+                            { extensionTypevar : MonoType, fields : Dict VarName MonoType }
+                            -> { extensionTypevar : MonoType, fields : Dict VarName MonoType }
+                            -> StateM ()
+                        webglSet set1 set2 =
+                            let
+                                ( only1, only2, sharedEqs ) =
+                                    Dict.merge
+                                        (\k v ( o1, o2, eqs ) ->
+                                            ( Dict.insert k v o1, o2, eqs )
+                                        )
+                                        (\_ v1 v2 ( o1, o2, eqs ) ->
+                                            ( o1, o2, ( v1, v2 ) :: eqs )
+                                        )
+                                        (\k v ( o1, o2, eqs ) ->
+                                            ( o1, Dict.insert k v o2, eqs )
+                                        )
+                                        set1.fields
+                                        set2.fields
+                                        ( Dict.empty, Dict.empty, [] )
 
-                    WebGLShader webgl2 ->
-                        let
-                            {- Unify one of a shader's attribute/uniform/varying sets.
+                                isClosed : MonoType -> Bool
+                                isClosed extensionTypevar =
+                                    case extensionTypevar of
+                                        Record _ ->
+                                            True
 
-                               Shader sets are special: the GLSL literal opens them, and a type
-                               annotation can narrow them down to a closed record. So a closed
-                               side only requires that its fields are present (with matching
-                               types) in the other side; the open side absorbs the difference.
-                               Two closed sides still have to agree on the field set.
-                            -}
-                            webglSet :
-                                { extensionTypevar : MonoType, fields : Dict VarName MonoType }
-                                -> { extensionTypevar : MonoType, fields : Dict VarName MonoType }
-                                -> StateM ()
-                            webglSet set1 set2 =
+                                        _ ->
+                                            False
+
+                                closed1 : Bool
+                                closed1 =
+                                    isClosed set1.extensionTypevar
+
+                                closed2 : Bool
+                                closed2 =
+                                    isClosed set2.extensionTypevar
+                            in
+                            if closed1 && closed2 && not (Dict.isEmpty only1 && Dict.isEmpty only2) then
+                                typeMismatch cfg t1 t2
+
+                            else
+                                State.do State.getNextIdAndTick <| \tailId ->
                                 let
-                                    ( only1, only2, sharedEqs ) =
-                                        Dict.merge
-                                            (\k v ( o1, o2, eqs ) ->
-                                                ( Dict.insert k v o1, o2, eqs )
-                                            )
-                                            (\_ v1 v2 ( o1, o2, eqs ) ->
-                                                ( o1, o2, ( v1, v2 ) :: eqs )
-                                            )
-                                            (\k v ( o1, o2, eqs ) ->
-                                                ( o1, Dict.insert k v o2, eqs )
-                                            )
-                                            set1.fields
-                                            set2.fields
-                                            ( Dict.empty, Dict.empty, [] )
+                                    tail : MonoType
+                                    tail =
+                                        TypeI.id_ tailId
 
-                                    isClosed : MonoType -> Bool
-                                    isClosed extensionTypevar =
-                                        case extensionTypevar of
-                                            Record _ ->
-                                                True
-
-                                            _ ->
-                                                False
-
-                                    closed1 : Bool
-                                    closed1 =
-                                        isClosed set1.extensionTypevar
-
-                                    closed2 : Bool
-                                    closed2 =
-                                        isClosed set2.extensionTypevar
+                                    absorb : MonoType -> Dict VarName MonoType -> List ( MonoType, MonoType )
+                                    absorb extensionTypevar fields =
+                                        [ ( extensionTypevar
+                                          , ExtensibleRecord
+                                                { extensionTypevar = tail
+                                                , fields = fields
+                                                }
+                                          )
+                                        ]
                                 in
-                                if closed1 && closed2 && not (Dict.isEmpty only1 && Dict.isEmpty only2) then
-                                    typeMismatch cfg t1 t2
+                                if not closed1 && not closed2 then
+                                    unifyMany cfg (absorb set1.extensionTypevar only2 ++ absorb set2.extensionTypevar only1 ++ sharedEqs)
+
+                                else if not closed1 then
+                                    unifyMany cfg (absorb set1.extensionTypevar only2 ++ sharedEqs)
+
+                                else if not closed2 then
+                                    unifyMany cfg (absorb set2.extensionTypevar only1 ++ sharedEqs)
 
                                 else
-                                    State.do State.getNextIdAndTick <| \tailId ->
-                                    let
-                                        tail : MonoType
-                                        tail =
-                                            TypeI.id_ tailId
-
-                                        absorb : MonoType -> Dict VarName MonoType -> List ( MonoType, MonoType )
-                                        absorb extensionTypevar fields =
-                                            [ ( extensionTypevar
-                                              , ExtensibleRecord
-                                                    { extensionTypevar = tail
-                                                    , fields = fields
-                                                    }
-                                              )
-                                            ]
-                                    in
-                                    if not closed1 && not closed2 then
-                                        unifyMany cfg (absorb set1.extensionTypevar only2 ++ absorb set2.extensionTypevar only1 ++ sharedEqs)
-
-                                    else if not closed1 then
-                                        unifyMany cfg (absorb set1.extensionTypevar only2 ++ sharedEqs)
-
-                                    else if not closed2 then
-                                        unifyMany cfg (absorb set2.extensionTypevar only1 ++ sharedEqs)
-
-                                    else
-                                        unifyMany cfg sharedEqs
-                        in
-                        State.do
-                            (webglSet
-                                { extensionTypevar = webgl1.attributesExtension
-                                , fields = webgl1.attributes
-                                }
-                                { extensionTypevar = webgl2.attributesExtension
-                                , fields = webgl2.attributes
-                                }
-                            )
-                        <| \() ->
-                        State.do
-                            (webglSet
-                                { extensionTypevar = webgl1.uniformsExtension
-                                , fields = webgl1.uniforms
-                                }
-                                { extensionTypevar = webgl2.uniformsExtension
-                                , fields = webgl2.uniforms
-                                }
-                            )
-                        <| \() ->
-                        webglSet
-                            { extensionTypevar = webgl1.varyingsExtension
-                            , fields = webgl1.varyings
+                                    unifyMany cfg sharedEqs
+                    in
+                    State.do
+                        (webglSet
+                            { extensionTypevar = webgl1.attributesExtension
+                            , fields = webgl1.attributes
                             }
-                            { extensionTypevar = webgl2.varyingsExtension
-                            , fields = webgl2.varyings
+                            { extensionTypevar = webgl2.attributesExtension
+                            , fields = webgl2.attributes
                             }
+                        )
+                    <| \() ->
+                    State.do
+                        (webglSet
+                            { extensionTypevar = webgl1.uniformsExtension
+                            , fields = webgl1.uniforms
+                            }
+                            { extensionTypevar = webgl2.uniformsExtension
+                            , fields = webgl2.uniforms
+                            }
+                        )
+                    <| \() ->
+                    webglSet
+                        { extensionTypevar = webgl1.varyingsExtension
+                        , fields = webgl1.varyings
+                        }
+                        { extensionTypevar = webgl2.varyingsExtension
+                        , fields = webgl2.varyings
+                        }
 
-                    _ ->
-                        typeMismatch cfg t1 t2
+                _ ->
+                    typeMismatch cfg t1 t2
 
 
 {-| Binds an unbound typeVar root with a given monotype.
@@ -1009,27 +587,19 @@ Both are already substituted.
 -}
 bind : UnifyConfig -> TypeVar -> MonoType -> StateM ()
 bind cfg typeVar type_ =
-    if shallowEqual type_ (TypeVar typeVar) then
-        State.pureUnit
+    case type_ of
+        TypeVar otherVar ->
+            if TypeVar.equal otherVar typeVar then
+                State.pureUnit
 
-    else if occursCheck typeVar type_ then
-        let
-            ( pubVar, pubType ) =
-                TypeI.normalizeAndToPublicPair cfg.moduleMapping (TypeVar typeVar) type_
-        in
-        State.error
-            { moduleName = FullModuleName.toModuleName cfg.moduleName
-            , declarationNames = cfg.declarationNames
-            , details = InfiniteType pubVar pubType
-            }
+            else
+                let
+                    ( otherStyle, otherSuper ) =
+                        otherVar
 
-    else
-        let
-            ( style, super ) =
-                typeVar
-        in
-        case type_ of
-            TypeVar (( otherStyle, otherSuper ) as otherVar) ->
+                    ( style, super ) =
+                        typeVar
+                in
                 case meet super otherSuper of
                     Nothing ->
                         let
@@ -1088,14 +658,42 @@ bind cfg typeVar type_ =
                                         |> SubstitutionMap.linkTo { child = otherVar, parent = fresh }
                                 )
 
-            _ ->
-                if accepts cfg.typeAliases super type_ then
-                    State.modifySubst (\subst -> SubstitutionMap.bindRoot typeVar type_ subst)
+        _ ->
+            if occursCheck typeVar type_ then
+                let
+                    ( pubVar, pubType ) =
+                        TypeI.normalizeAndToPublicPair cfg.moduleMapping (TypeVar typeVar) type_
+                in
+                State.error
+                    { moduleName = FullModuleName.toModuleName cfg.moduleName
+                    , declarationNames = cfg.declarationNames
+                    , details = InfiniteType pubVar pubType
+                    }
+
+            else
+                let
+                    ( _, super ) =
+                        typeVar
+
+                    typeExpanded : MonoType
+                    typeExpanded =
+                        -- TODO don't expand once normalizeAndToPublicType has been changed
+                        TypeI.expandAliasAndCollapse cfg.typeAliases type_
+                in
+                if accepts super typeExpanded then
+                    State.modifySubst
+                        (\subst ->
+                            SubstitutionMap.bindRoot typeVar
+                                typeExpanded
+                                subst
+                        )
 
                 else
                     let
                         ( pubVar, pubType ) =
-                            TypeI.normalizeAndToPublicPair cfg.moduleMapping (TypeVar typeVar) type_
+                            TypeI.normalizeAndToPublicPair cfg.moduleMapping
+                                (TypeVar typeVar)
+                                typeExpanded
                     in
                     State.error
                         { moduleName = FullModuleName.toModuleName cfg.moduleName
@@ -1181,14 +779,14 @@ meet a b =
                     Just CompAppend
 
 
-accepts : TypeAliases -> SuperType -> MonoType -> Bool
-accepts typeAliases super type_ =
+accepts : SuperType -> MonoType -> Bool
+accepts super type_ =
     case super of
         Normal ->
             True
 
         Number ->
-            case expandAlias typeAliases type_ of
+            case type_ of
                 Int ->
                     True
 
@@ -1199,18 +797,18 @@ accepts typeAliases super type_ =
                     False
 
         Comparable ->
-            isComparable typeAliases type_
+            isComparable type_
 
         Appendable ->
-            isAppendable typeAliases type_
+            isAppendable type_
 
         CompAppend ->
-            isComparable typeAliases type_ && isAppendable typeAliases type_
+            isComparable type_ && isAppendable type_
 
 
-isComparable : TypeAliases -> MonoType -> Bool
-isComparable typeAliases type_ =
-    case expandAlias typeAliases type_ of
+isComparable : MonoType -> Bool
+isComparable type_ =
+    case type_ of
         Int ->
             True
 
@@ -1224,20 +822,20 @@ isComparable typeAliases type_ =
             True
 
         List inner ->
-            isComparable typeAliases inner
+            isComparable inner
 
         Tuple2 a b ->
             -- && but with a bit of TCO
-            if isComparable typeAliases a then
-                isComparable typeAliases b
+            if isComparable a then
+                isComparable b
 
             else
                 False
 
         Tuple3 a b c ->
             -- && but with a bit of TCO
-            if isComparable typeAliases a && isComparable typeAliases b then
-                isComparable typeAliases c
+            if isComparable a && isComparable b then
+                isComparable c
 
             else
                 False
@@ -1267,9 +865,9 @@ isComparable typeAliases type_ =
             False
 
 
-isAppendable : TypeAliases -> MonoType -> Bool
-isAppendable typeAliases type_ =
-    case expandAlias typeAliases type_ of
+isAppendable : MonoType -> Bool
+isAppendable type_ =
+    case type_ of
         String ->
             True
 

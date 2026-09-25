@@ -268,7 +268,7 @@ annotationType ctx maybeSigNode =
                 Node.value sigNode
                     |> .typeAnnotation
                     |> Node.value
-                    |> TypeI.fromTypeAnnotation (typeResolver ctx)
+                    |> TypeI.fromTypeAnnotation (typeResolver ctx) ctx.typeAliases
             of
                 Err fromTypeAnnotationError ->
                     State.error (toError ctx (TypeI.fromTypeAnnotationError fromTypeAnnotationError))
@@ -341,6 +341,10 @@ functionMember ctx declNode fn installFor =
 -}
 topLevelMember : Ctx -> Node Declaration -> Expression.Function -> StateM BindingGroup.Member
 topLevelMember ctx declNode fn =
+    let
+        _ =
+            Debug.log "solve top level function" ( fn.declaration |> Node.value |> .name |> Node.value, ctx.typeAliases )
+    in
     functionMember
         ctx
         declNode
@@ -929,7 +933,7 @@ solveLetDeclarations ctx declarations =
                                         LetDestructuring patternNode exprNode ->
                                             ( fns, ( declNode, patternNode, exprNode ) :: dests )
                         )
-                        ( [], [] )
+                        tupleListEmptyListEmpty
                         groupIndices
             in
             State.do
@@ -971,6 +975,11 @@ solveLetDeclarations ctx declarations =
     State.do preinstallAnnotated <| \() ->
     sccs
         |> State.traverseUnit solveGroup
+
+
+tupleListEmptyListEmpty : ( List a, List b )
+tupleListEmptyListEmpty =
+    ( [], [] )
 
 
 

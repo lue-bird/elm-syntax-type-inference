@@ -2998,7 +2998,7 @@ infiniteLoopRegression =
     Test.test "infinite loop for extensible records - regression test" <| \() ->
     getDeclTypeWithDeps [ CoreFixture.core ] modules [ "Main" ] "update"
         |> Result.map Type.toString
-        |> Expect.equal (Ok "List Main.Window -> List Main.Window")
+        |> Expect.equal (Ok "List {pid : Int, position : Int} -> List {pid : Int, position : Int}")
 
 
 aliasParamNameCollisionRegression : Test
@@ -3021,7 +3021,7 @@ aliasParamNameCollisionRegression =
     Test.test "type alias whose own generic param name collides with the caller's generic name (regression test)" <| \() ->
     getDeclType modules [ "Main" ] "apply"
         |> Result.map Type.toString
-        |> Expect.equal (Ok "Main.Wrap acc -> acc -> acc")
+        |> Expect.equal (Ok "(acc -> acc) -> acc -> acc")
 
 
 recordConstructorFunctionRegression : Test
@@ -3275,7 +3275,7 @@ shadowedListRegression =
                 [ "Main" ]
                 "singleton"
                 |> Result.map Type.toString
-                |> Expect.equal (Ok "id -> value -> Main.List id value")
+                |> Expect.equal (Ok "id -> value -> List ( id, value )")
 
 
 duplicateImportAliasRegression : Test
@@ -3326,7 +3326,7 @@ duplicateImportAliasRegression =
                 [ \() ->
                     getDeclType modules [ "Main" ] "useBaz"
                         |> Result.map Type.toString
-                        |> Expect.equal (Ok "B.Baz -> Int")
+                        |> Expect.equal (Ok "{x : Int} -> Int")
                 , \() ->
                     getDeclType modules [ "Main" ] "value"
                         |> Result.map Type.toString
@@ -3473,7 +3473,7 @@ extensibleRecordRegression =
             in
             getDeclTypeWithDeps [ CoreFixture.core ] modules [ "Main" ] "applyForce"
                 |> Result.map Type.toString
-                |> Expect.equal (Ok "Dict.Dict comparable (Main.Entity comparable a) -> Dict.Dict comparable (Main.Entity comparable a)")
+                |> Expect.equal (Ok "Dict.Dict comparable { a | id : comparable, x : Float, y : Float } -> Dict.Dict comparable { a | id : comparable, x : Float, y : Float }")
 
 
 extensibleAliasOverlapRegression : Test

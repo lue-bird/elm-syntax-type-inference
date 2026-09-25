@@ -5,10 +5,12 @@ module Elm.TypeInference.Type.Internal exposing
     , TypeResolver
     , closeOver
     , collapseExtensible
-    , collapsePrimitive
+    , expandAliasAndCollapse
+    , expandAliasDeep
     , external
     , fromTypeAnnotation
     , fromTypeAnnotationError
+    , fromTyped
     , id_
     , mapVarsMono
     , mono
@@ -18,6 +20,7 @@ module Elm.TypeInference.Type.Internal exposing
     , normalizeToMonoPublicKeyAlpha
     , number_
     , renameToAnnotation
+    , userDefinedTypeExpandAliasAndCollapse
     )
 
 import Dict exposing (Dict)
@@ -35,6 +38,7 @@ import Elm.TypeInference.TypeVar as TypeVar
         , TypeVarStyle(..)
         )
 import Elm.TypeInference.VarSet as VarSet exposing (superTypeTag)
+import List.ExtraExtra
 import Result.Extra
 import Set exposing (Set)
 
@@ -161,82 +165,9 @@ collapseExtensible r1 =
                 ExtensibleRecord r1
 
 
-{-| Converts special `UserDefinedType`s into dedicated `MonoType`s:
-
-  - `elm/core` Int, Float, Bool, Char, String, List
-  - `elm-explorations/webgl` Shader
-
--}
-collapsePrimitive : PackageName -> ModuleId -> VarName -> List MonoType -> Maybe MonoType
-collapsePrimitive package moduleId name args =
-    if package == ImplicitImports.elmCorePackage then
-        collapseElmCoreType moduleId name args
-
-    else if package == webGLPackage then
-        collapseWebGLShader moduleId name args
-
-    else
-        Nothing
-
-
 webGLPackage : PackageName
 webGLPackage =
     "elm-explorations/webgl"
-
-
-collapseElmCoreType : ModuleId -> VarName -> List MonoType -> Maybe MonoType
-collapseElmCoreType moduleId name args =
-    case args of
-        [] ->
-            if ModuleIds.equal moduleId ModuleIds.basicsId then
-                case name of
-                    "Int" ->
-                        Just Int
-
-                    "Float" ->
-                        Just Float
-
-                    "Bool" ->
-                        Just Bool
-
-                    _ ->
-                        Nothing
-
-            else if ModuleIds.equal moduleId ModuleIds.charId && name == "Char" then
-                Just Char
-
-            else if ModuleIds.equal moduleId ModuleIds.stringId && name == "String" then
-                Just String
-
-            else
-                Nothing
-
-        [ inner ] ->
-            if ModuleIds.equal moduleId ModuleIds.listId && name == "List" then
-                Just (List inner)
-
-            else
-                Nothing
-
-        _ ->
-            Nothing
-
-
-collapseWebGLShader : ModuleId -> VarName -> List MonoType -> Maybe MonoType
-collapseWebGLShader moduleId name args =
-    if ModuleIds.equal moduleId ModuleIds.webGLId && name == "Shader" then
-        case args of
-            [ attributes, uniforms, varyings ] ->
-                Maybe.map3 makeWebGLShader
-                    (shaderSetSlot attributes)
-                    (shaderSetSlot uniforms)
-                    (shaderSetSlot varyings)
-
-            _ ->
-                Nothing
-
-    else
-        Nothing
 
 
 {-| WebGL Shader typevars can be of three shapes:
@@ -649,69 +580,50 @@ charFromLetterIndex i =
     Char.fromCode <| i + Char.toCode 'a'
 
 
-fromTypeAnnotation : TypeResolver -> TypeAnnotation -> Result FromTypeAnnotationError MonoType
-fromTypeAnnotation resolver typeAnnotation =
+fromTypeAnnotation : TypeResolver -> TypeAliases -> TypeAnnotation -> Result FromTypeAnnotationError MonoType
+fromTypeAnnotation resolver typeAliases typeAnnotation =
     case typeAnnotation of
         TypeAnnotation.GenericType name ->
             Ok <| TypeVar (TypeVar.parse name)
 
-        TypeAnnotation.Typed name annotations ->
+        TypeAnnotation.Typed nameNode argAnnotations ->
             let
-                args : Result FromTypeAnnotationError (List MonoType)
-                args =
-                    annotations
-                        |> Result.Extra.combineMap (\(Node.Node _ arg) -> fromTypeAnnotation resolver arg)
+                ( qualification, typeName ) =
+                    Node.value nameNode
             in
-            -- Resolve names before collapsing primitives: local or imported
-            -- types can shadow implicit names such as List, Int, and String.
-            args
-                |> Result.andThen
-                    (\args_ ->
-                        let
-                            ( moduleName, typeName ) =
-                                Node.value name
-                        in
-                        resolver moduleName typeName
-                            |> Result.mapError AmbiguousModuleName
-                            |> Result.map
-                                (\( package, moduleId ) ->
-                                    case collapsePrimitive package moduleId typeName args_ of
-                                        Just collapsed ->
-                                            collapsed
-
-                                        Nothing ->
-                                            UserDefinedType
-                                                { package = package
-                                                , moduleId = moduleId
-                                                , name = typeName
-                                                , args = args_
-                                                }
-                                )
-                    )
+            Result.map2
+                (\( package, moduleId ) argTypes ->
+                    fromTyped typeAliases package moduleId typeName argTypes
+                )
+                (resolver qualification typeName |> Result.mapError AmbiguousModuleName)
+                (argAnnotations
+                    |> Result.Extra.combineMap
+                        (\(Node.Node _ arg) -> fromTypeAnnotation resolver typeAliases arg)
+                )
 
         TypeAnnotation.Unit ->
             Ok Unit
 
         TypeAnnotation.Tupled [ a, b ] ->
             Result.map2 Tuple2
-                (fromTypeAnnotation resolver (Node.value a))
-                (fromTypeAnnotation resolver (Node.value b))
+                (fromTypeAnnotation resolver typeAliases (Node.value a))
+                (fromTypeAnnotation resolver typeAliases (Node.value b))
 
         TypeAnnotation.Tupled [ a, b, c ] ->
             Result.map3 Tuple3
-                (fromTypeAnnotation resolver (Node.value a))
-                (fromTypeAnnotation resolver (Node.value b))
-                (fromTypeAnnotation resolver (Node.value c))
+                (fromTypeAnnotation resolver typeAliases (Node.value a))
+                (fromTypeAnnotation resolver typeAliases (Node.value b))
+                (fromTypeAnnotation resolver typeAliases (Node.value c))
 
         TypeAnnotation.Tupled _ ->
             Err (ImpossibleAnnotation typeAnnotation)
 
         TypeAnnotation.Record fields ->
-            recordBindings resolver fields
+            recordBindings resolver typeAliases fields
                 |> Result.map Record
 
         TypeAnnotation.GenericRecord name fields ->
-            recordBindings resolver (Node.value fields)
+            recordBindings resolver typeAliases (Node.value fields)
                 |> Result.map
                     (\fields_ ->
                         ExtensibleRecord
@@ -728,19 +640,172 @@ fromTypeAnnotation resolver typeAnnotation =
                         , to = to_
                         }
                 )
-                (fromTypeAnnotation resolver (Node.value from))
-                (fromTypeAnnotation resolver (Node.value to))
+                (fromTypeAnnotation resolver typeAliases (Node.value from))
+                (fromTypeAnnotation resolver typeAliases (Node.value to))
+
+
+{-| Remember to resolve names before collapsing primitives with `TypeI.fromTyped`: local or imported
+types can shadow implicit names such as List, Int, and String.
+-}
+fromTyped : TypeAliases -> String -> ModuleId -> String -> List MonoType -> MonoType
+fromTyped typeAliases package moduleId typeName argTypes =
+    let
+        _ =
+            Debug.log "from Typed type annotation" ( package, moduleId, typeName )
+    in
+    if package == ImplicitImports.elmCorePackage then
+        case argTypes of
+            [] ->
+                if ModuleIds.equal moduleId ModuleIds.basicsId then
+                    case typeName of
+                        "Int" ->
+                            Int
+
+                        "Float" ->
+                            Float
+
+                        "Bool" ->
+                            Bool
+
+                        _ ->
+                            UserDefinedType
+                                { package = package
+                                , moduleId = moduleId
+                                , name = typeName
+                                , args = []
+                                }
+
+                else if ModuleIds.equal moduleId ModuleIds.charId && typeName == "Char" then
+                    Char
+
+                else if ModuleIds.equal moduleId ModuleIds.stringId && typeName == "String" then
+                    String
+
+                else
+                    UserDefinedType
+                        { package = package
+                        , moduleId = moduleId
+                        , name = typeName
+                        , args = []
+                        }
+
+            [ innerType ] ->
+                if ModuleIds.equal moduleId ModuleIds.listId && typeName == "List" then
+                    List innerType
+
+                else
+                    -- assumes no type aliases are defined in module List
+                    UserDefinedType
+                        { package = package
+                        , moduleId = moduleId
+                        , name = typeName
+                        , args = [ innerType ]
+                        }
+
+            _ ->
+                fromTypedNotDirectlyCollapsible
+                    typeAliases
+                    package
+                    moduleId
+                    typeName
+                    argTypes
+
+    else if package == webGLPackage then
+        if ModuleIds.equal moduleId ModuleIds.webGLId && typeName == "Shader" then
+            case argTypes of
+                [ attributesType, uniformsType, varyingsType ] ->
+                    case
+                        Maybe.map3 makeWebGLShader
+                            (shaderSetSlot attributesType)
+                            (shaderSetSlot uniformsType)
+                            (shaderSetSlot varyingsType)
+                    of
+                        Just webGlShaderType ->
+                            webGlShaderType
+
+                        Nothing ->
+                            fromTypedNotDirectlyCollapsible
+                                typeAliases
+                                package
+                                moduleId
+                                typeName
+                                argTypes
+
+                _ ->
+                    fromTypedNotDirectlyCollapsible
+                        typeAliases
+                        package
+                        moduleId
+                        typeName
+                        argTypes
+
+        else
+            fromTypedNotDirectlyCollapsible
+                typeAliases
+                package
+                moduleId
+                typeName
+                argTypes
+
+    else
+        fromTypedNotDirectlyCollapsible
+            typeAliases
+            package
+            moduleId
+            typeName
+            argTypes
+
+
+fromTypedNotDirectlyCollapsible :
+    TypeAliases
+    -> PackageName
+    -> ModuleId
+    -> VarName
+    -> List MonoType
+    -> MonoType
+fromTypedNotDirectlyCollapsible typeAliases package moduleId typeName argTypes =
+    case Dict.get ( moduleId, package, typeName ) typeAliases of
+        Nothing ->
+            UserDefinedType
+                { package = package
+                , moduleId = moduleId
+                , name = typeName
+                , args = argTypes
+                }
+
+        Just alias_ ->
+            case List.ExtraExtra.map2OrNothingIfLengthsDiffer alias_.args argTypes of
+                {- Imagine:
+
+                   type alias Pair first second =
+                       ( first, second )
+
+                   x : Pair Int
+                   x = ( 1, "oops" )
+
+                -}
+                Nothing ->
+                    UserDefinedType
+                        { package = package
+                        , moduleId = moduleId
+                        , name = typeName
+                        , args = argTypes
+                        }
+
+                Just mappings ->
+                    substituteAliasArgs mappings alias_.type_
 
 
 recordBindings :
     TypeResolver
+    -> TypeAliases
     -> List (Node ( Node String, Node TypeAnnotation ))
     -> Result FromTypeAnnotationError (Dict VarName MonoType)
-recordBindings resolver fields =
+recordBindings resolver typeAliases fields =
     fields
         |> Result.Extra.foldlWhileOk
             (\(Node.Node _ ( Node.Node _ fieldName, Node.Node _ fieldValueAnnotation )) acc ->
-                fromTypeAnnotation resolver fieldValueAnnotation
+                fromTypeAnnotation resolver typeAliases fieldValueAnnotation
                     |> Result.map (\type_ -> Dict.insert fieldName type_ acc)
             )
             Dict.empty
@@ -761,15 +826,10 @@ fromTypeAnnotationError err =
 normalizeAndToPublicType : ModuleIds.Mapping -> MonoType -> Public.Type
 normalizeAndToPublicType moduleMapping unnormalizedMono =
     let
-        mono_ : MonoType
-        mono_ =
-            let
-                (Forall _ normalizedMono) =
-                    normalize (Forall [] unnormalizedMono)
-            in
-            normalizedMono
+        (Forall _ normalizedMono) =
+            normalize (Forall [] unnormalizedMono)
     in
-    toPublicTypeNormalized moduleMapping mono_
+    toPublicTypeNormalized moduleMapping normalizedMono
 
 
 moduleIdToModuleName : ModuleIds.Mapping -> ModuleId -> List String
@@ -1654,3 +1714,361 @@ maybeStrKey m =
 
         Just s ->
             "1;" ++ strKey s
+
+
+type alias TypeAlias =
+    { type_ : MonoType
+    , args : List TypeVar
+    }
+
+
+type alias TypeAliases =
+    Dict ( ModuleId, PackageName, VarName ) TypeAlias
+
+
+{-| Expand alias (substitute its args) recursively, then collapse primitives, extensible records
+and `Shader` annotations like:
+
+    type alias Vertex =
+        { position : Vec2 }
+
+    shader : Shader Vertex { view : Mat4 } { vcoord : Vec2 }
+
+There is a possibility of infinite cycles. We use `fuel` to stop the expansion
+after a while and provide a type mismatch instead of a hang.
+
+Intentionally shallow to preserve inferred types to be as high-level (aliases)
+as possible, instead of the low-level records underneath.
+Full expansion only happens in error reporting.
+
+-}
+expandAliasAndCollapse : TypeAliases -> MonoType -> MonoType
+expandAliasAndCollapse typeAliases type_ =
+    expandAliasAndCollapseHelp maxAliasDepth typeAliases type_
+
+
+{-| This should be enough (any real alias chain like that should be
+unreadable/unusable in real code).
+-}
+maxAliasDepth : Int
+maxAliasDepth =
+    1000
+
+
+expandAliasAndCollapseHelp : Int -> TypeAliases -> MonoType -> MonoType
+expandAliasAndCollapseHelp fuel typeAliases type_ =
+    case type_ of
+        UserDefinedType ut ->
+            userDefinedTypeExpandAliasAndCollapseHelp fuel typeAliases ut
+
+        ExtensibleRecord r ->
+            if fuel <= 0 then
+                type_
+
+            else
+                collapseExtensible
+                    { extensionTypevar = expandAliasAndCollapseHelp (fuel - 1) typeAliases r.extensionTypevar
+                    , fields = r.fields
+                    }
+
+        _ ->
+            type_
+
+
+{-| Like `expandAliasAndCollapse` but from a known UserDefinedType
+-}
+userDefinedTypeExpandAliasAndCollapse : TypeAliases -> { package : PackageName, moduleId : ModuleId, name : VarName, args : List MonoType } -> MonoType
+userDefinedTypeExpandAliasAndCollapse typeAliases utMaybeAliased =
+    userDefinedTypeExpandAliasAndCollapseHelp maxAliasDepth typeAliases utMaybeAliased
+
+
+userDefinedTypeExpandAliasAndCollapseHelp : Int -> TypeAliases -> { package : PackageName, moduleId : ModuleId, name : VarName, args : List MonoType } -> MonoType
+userDefinedTypeExpandAliasAndCollapseHelp fuel typeAliases ut =
+    if fuel <= 0 then
+        UserDefinedType ut
+
+    else if ut.package == ImplicitImports.elmCorePackage then
+        case ut.args of
+            [] ->
+                if ModuleIds.equal ut.moduleId ModuleIds.basicsId then
+                    case ut.name of
+                        "Int" ->
+                            Int
+
+                        "Float" ->
+                            Float
+
+                        "Bool" ->
+                            Bool
+
+                        _ ->
+                            UserDefinedType ut
+
+                else if ModuleIds.equal ut.moduleId ModuleIds.charId && ut.name == "Char" then
+                    Char
+
+                else if ModuleIds.equal ut.moduleId ModuleIds.stringId && ut.name == "String" then
+                    String
+
+                else
+                    UserDefinedType ut
+
+            [ inner ] ->
+                if ModuleIds.equal ut.moduleId ModuleIds.listId && ut.name == "List" then
+                    List inner
+
+                else
+                    UserDefinedType ut
+
+            _ ->
+                UserDefinedType ut
+
+    else if ut.package == webGLPackage then
+        if ModuleIds.equal ut.moduleId ModuleIds.webGLId && ut.name == "Shader" then
+            case ut.args of
+                [ attributes, uniforms, varyings ] ->
+                    case
+                        Maybe.map3 makeWebGLShader
+                            (shaderSetSlot (expandAliasAndCollapse typeAliases attributes))
+                            (shaderSetSlot (expandAliasAndCollapse typeAliases uniforms))
+                            (shaderSetSlot (expandAliasAndCollapse typeAliases varyings))
+                    of
+                        Just collapsed ->
+                            collapsed
+
+                        Nothing ->
+                            UserDefinedType ut
+
+                _ ->
+                    UserDefinedType ut
+
+        else
+            UserDefinedType ut
+
+    else
+        case Dict.get ( ut.moduleId, ut.package, ut.name ) typeAliases of
+            Nothing ->
+                UserDefinedType ut
+
+            Just alias_ ->
+                case List.ExtraExtra.map2OrNothingIfLengthsDiffer alias_.args ut.args of
+                    {- Imagine:
+
+                       type alias Pair first second =
+                           ( first, second )
+
+                       x : Pair Int
+                       x = ( 1, "oops" )
+
+                    -}
+                    Nothing ->
+                        UserDefinedType ut
+
+                    Just mappings ->
+                        expandAliasAndCollapseHelp (fuel - 1) typeAliases (substituteAliasArgs mappings alias_.type_)
+
+
+{-| Expand nested record aliases for error display.
+
+(Unification is shallow to allow inferred types to be shown as the high-level
+aliases instead of as the low-level records underneath them).
+
+-}
+expandAliasDeep : TypeAliases -> MonoType -> MonoType
+expandAliasDeep typeAliases type_ =
+    case expandAliasDeepHelp maxAliasDepth typeAliases type_ of
+        ExtensibleRecord extensibleRecordUncollapsed ->
+            collapseExtensible extensibleRecordUncollapsed
+
+        notExtensibleRecord ->
+            notExtensibleRecord
+
+
+expandAliasDeepHelp : Int -> TypeAliases -> MonoType -> MonoType
+expandAliasDeepHelp fuel typeAliases type_ =
+    case type_ of
+        UserDefinedType ut ->
+            if fuel <= 0 then
+                expandDeepChildren fuel typeAliases type_
+
+            else
+                case Dict.get ( ut.moduleId, ut.package, ut.name ) typeAliases of
+                    Nothing ->
+                        expandDeepChildren fuel typeAliases type_
+
+                    Just alias_ ->
+                        case List.ExtraExtra.map2OrNothingIfLengthsDiffer alias_.args ut.args of
+                            Nothing ->
+                                expandDeepChildren fuel typeAliases type_
+
+                            Just mappings ->
+                                expandAliasDeepHelp (fuel - 1) typeAliases (substituteAliasArgs mappings alias_.type_)
+
+        _ ->
+            expandDeepChildren fuel typeAliases type_
+
+
+{-| Expand aliases fully. Fuel counts depth instead of breadth.
+-}
+expandDeepChildren : Int -> TypeAliases -> MonoType -> MonoType
+expandDeepChildren fuel typeAliases type_ =
+    case type_ of
+        TypeVar _ ->
+            type_
+
+        Function f ->
+            Function
+                { from = expandAliasDeepHelp fuel typeAliases f.from
+                , to = expandAliasDeepHelp fuel typeAliases f.to
+                }
+
+        Int ->
+            type_
+
+        Float ->
+            type_
+
+        Char ->
+            type_
+
+        String ->
+            type_
+
+        Bool ->
+            type_
+
+        List listItemType ->
+            List (expandAliasDeepHelp fuel typeAliases listItemType)
+
+        Unit ->
+            type_
+
+        Tuple2 t1 t2 ->
+            Tuple2
+                (expandAliasDeepHelp fuel typeAliases t1)
+                (expandAliasDeepHelp fuel typeAliases t2)
+
+        Tuple3 t1 t2 t3 ->
+            Tuple3
+                (expandAliasDeepHelp fuel typeAliases t1)
+                (expandAliasDeepHelp fuel typeAliases t2)
+                (expandAliasDeepHelp fuel typeAliases t3)
+
+        Record rFields ->
+            Record
+                (Dict.map (\_ v -> expandAliasDeepHelp fuel typeAliases v) rFields)
+
+        ExtensibleRecord r ->
+            ExtensibleRecord
+                { extensionTypevar = expandAliasDeepHelp fuel typeAliases r.extensionTypevar
+                , fields = Dict.map (\_ v -> expandAliasDeepHelp fuel typeAliases v) r.fields
+                }
+
+        UserDefinedType r ->
+            UserDefinedType
+                { package = r.package
+                , moduleId = r.moduleId
+                , name = r.name
+                , args = List.map (\arg -> expandAliasDeepHelp fuel typeAliases arg) r.args
+                }
+
+        WebGLShader r ->
+            WebGLShader
+                { attributesExtension = expandAliasDeepHelp fuel typeAliases r.attributesExtension
+                , attributes = Dict.map (\_ v -> expandAliasDeepHelp fuel typeAliases v) r.attributes
+                , uniformsExtension = expandAliasDeepHelp fuel typeAliases r.uniformsExtension
+                , uniforms = Dict.map (\_ v -> expandAliasDeepHelp fuel typeAliases v) r.uniforms
+                , varyingsExtension = expandAliasDeepHelp fuel typeAliases r.varyingsExtension
+                , varyings = Dict.map (\_ v -> expandAliasDeepHelp fuel typeAliases v) r.varyings
+                }
+
+
+{-| Replace type alias' arguments with the supplied types, verbatim.
+-}
+substituteAliasArgs : List ( TypeVar, MonoType ) -> MonoType -> MonoType
+substituteAliasArgs mappings type_ =
+    case type_ of
+        TypeVar v ->
+            findAliasArg v mappings
+                |> Maybe.withDefault type_
+
+        -- The rest is recursion
+        Function f ->
+            Function
+                { from = substituteAliasArgs mappings f.from
+                , to = substituteAliasArgs mappings f.to
+                }
+
+        Int ->
+            type_
+
+        Float ->
+            type_
+
+        Char ->
+            type_
+
+        String ->
+            type_
+
+        Bool ->
+            type_
+
+        List listItemType ->
+            List (substituteAliasArgs mappings listItemType)
+
+        Unit ->
+            type_
+
+        Tuple2 t1 t2 ->
+            Tuple2 (substituteAliasArgs mappings t1) (substituteAliasArgs mappings t2)
+
+        Tuple3 t1 t2 t3 ->
+            Tuple3
+                (substituteAliasArgs mappings t1)
+                (substituteAliasArgs mappings t2)
+                (substituteAliasArgs mappings t3)
+
+        Record fields ->
+            Record (Dict.map (\_ v -> substituteAliasArgs mappings v) fields)
+
+        ExtensibleRecord r ->
+            ExtensibleRecord
+                { extensionTypevar = substituteAliasArgs mappings r.extensionTypevar
+                , fields = Dict.map (\_ v -> substituteAliasArgs mappings v) r.fields
+                }
+
+        UserDefinedType r ->
+            UserDefinedType
+                { package = r.package
+                , moduleId = r.moduleId
+                , name = r.name
+                , args = List.map (\arg -> substituteAliasArgs mappings arg) r.args
+                }
+
+        WebGLShader r ->
+            WebGLShader
+                { attributesExtension = substituteAliasArgs mappings r.attributesExtension
+                , attributes = Dict.map (\_ v -> substituteAliasArgs mappings v) r.attributes
+                , uniformsExtension = substituteAliasArgs mappings r.uniformsExtension
+                , uniforms = Dict.map (\_ v -> substituteAliasArgs mappings v) r.uniforms
+                , varyingsExtension = substituteAliasArgs mappings r.varyingsExtension
+                , varyings = Dict.map (\_ v -> substituteAliasArgs mappings v) r.varyings
+                }
+
+
+{-| Find the var in the alias argument list.
+List deemed acceptable (aliases don't have many arguments).
+-}
+findAliasArg : TypeVar -> List ( TypeVar, MonoType ) -> Maybe MonoType
+findAliasArg needle mappings =
+    case mappings of
+        [] ->
+            Nothing
+
+        ( param, argType ) :: rest ->
+            if TypeVar.equal param needle then
+                Just argType
+
+            else
+                findAliasArg needle rest

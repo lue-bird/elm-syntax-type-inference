@@ -135,30 +135,34 @@ resolverFor moduleMapping deps selfPackage =
                 )
 
 
-fromDocsType : Resolver -> Elm.Type.Type -> Result ErrorDetails MonoType
-fromDocsType resolver type_ =
+fromDocsType :
+    Resolver
+    -> Dict ( ModuleId, PackageName, VarName ) TypeAlias
+    -> Elm.Type.Type
+    -> Result ErrorDetails MonoType
+fromDocsType resolver typeAliases type_ =
     case type_ of
         Elm.Type.Var name ->
             Ok (TypeVar (TypeVar.parse name))
 
         Elm.Type.Lambda from to ->
             Result.map2 (\f t -> Function { from = f, to = t })
-                (fromDocsType resolver from)
-                (fromDocsType resolver to)
+                (fromDocsType resolver typeAliases from)
+                (fromDocsType resolver typeAliases to)
 
         Elm.Type.Tuple [] ->
             Ok Unit
 
         Elm.Type.Tuple [ a, b ] ->
             Result.map2 Tuple2
-                (fromDocsType resolver a)
-                (fromDocsType resolver b)
+                (fromDocsType resolver typeAliases a)
+                (fromDocsType resolver typeAliases b)
 
         Elm.Type.Tuple [ a, b, c ] ->
             Result.map3 Tuple3
-                (fromDocsType resolver a)
-                (fromDocsType resolver b)
-                (fromDocsType resolver c)
+                (fromDocsType resolver typeAliases a)
+                (fromDocsType resolver typeAliases b)
+                (fromDocsType resolver typeAliases c)
 
         Elm.Type.Tuple _ ->
             Err (ImpossibleDocsType type_)
@@ -168,32 +172,19 @@ fromDocsType resolver type_ =
                 ( moduleNameStr, typeName ) =
                     ModuleNameExtra.splitLastDot qualifiedName
             in
-            Result.andThen
-                (\( package, moduleId ) ->
-                    Result.Extra.combineMap (\arg -> fromDocsType resolver arg) args
-                        |> Result.map
-                            (\argTypes ->
-                                case TypeI.collapsePrimitive package moduleId typeName argTypes of
-                                    Just collapsed ->
-                                        collapsed
-
-                                    Nothing ->
-                                        UserDefinedType
-                                            { package = package
-                                            , moduleId = moduleId
-                                            , name = typeName
-                                            , args = argTypes
-                                            }
-                            )
+            Result.map2
+                (\( package, moduleId ) argTypes ->
+                    TypeI.fromTyped typeAliases package moduleId typeName argTypes
                 )
                 (resolver moduleNameStr)
+                (Result.Extra.combineMap (\arg -> fromDocsType resolver typeAliases arg) args)
 
         Elm.Type.Record fields Nothing ->
-            dictFromDocsFields resolver fields
+            dictFromDocsFields resolver typeAliases fields
                 |> Result.map Record
 
         Elm.Type.Record fields (Just rowVar) ->
-            dictFromDocsFields resolver fields
+            dictFromDocsFields resolver typeAliases fields
                 |> Result.map
                     (\resolvedFields ->
                         ExtensibleRecord
@@ -203,22 +194,30 @@ fromDocsType resolver type_ =
                     )
 
 
-dictFromDocsFields : Resolver -> List ( String, Elm.Type.Type ) -> Result ErrorDetails (Dict String MonoType)
-dictFromDocsFields resolver fields =
+dictFromDocsFields :
+    Resolver
+    -> Dict ( ModuleId, PackageName, VarName ) TypeAlias
+    -> List ( String, Elm.Type.Type )
+    -> Result ErrorDetails (Dict String MonoType)
+dictFromDocsFields resolver typeAliases fields =
     Result.Extra.foldlWhileOk
         (\( name, value ) acc ->
-            fromDocsType resolver value
+            fromDocsType resolver typeAliases value
                 |> Result.map (\valueType -> Dict.insert name valueType acc)
         )
         Dict.empty
         fields
 
 
-fromDocsFields : Resolver -> List ( String, Elm.Type.Type ) -> Result ErrorDetails (List ( String, MonoType ))
-fromDocsFields resolver fields =
+fromDocsFields :
+    Resolver
+    -> Dict ( ModuleId, PackageName, VarName ) TypeAlias
+    -> List ( String, Elm.Type.Type )
+    -> Result ErrorDetails (List ( String, MonoType ))
+fromDocsFields resolver typeAliases fields =
     Result.Extra.combineMap
         (\( name, value ) ->
-            fromDocsType resolver value
+            fromDocsType resolver typeAliases value
                 |> Result.map (\valueType -> ( name, valueType ))
         )
         fields
@@ -265,11 +264,13 @@ registerPackage moduleMapping deps pkgName pkg =
         resolver =
             resolverFor moduleMapping deps pkgName
     in
+    -- TODO SCC
+    -- TODO if is elm/core check for Basics and alter bindings Bool.True and Bool.False
+    -- to return TypeI.Bool instead of TypeI.UserDefined Basics.Bool (??)
     pkg.modules
         |> State.foldl
-            (\mod dict ->
-                State.map (\registeredPackage -> Dict.union registeredPackage dict)
-                    (registerModule moduleMapping pkgName resolver mod)
+            (\mod acc ->
+                registerModule moduleMapping pkgName resolver acc mod
             )
             Dict.empty
 
@@ -278,9 +279,10 @@ registerModule :
     ModuleIds.Mapping
     -> PackageName
     -> Resolver
+    -> Dict ( ModuleId, PackageName, VarName ) TypeAlias
     -> Elm.Docs.Module
     -> StateM (Dict ( ModuleId, PackageName, VarName ) TypeAlias)
-registerModule moduleMapping pkgName resolver mod =
+registerModule moduleMapping pkgName resolver typeAliasesNotIncludingThisModule mod =
     case ModuleIds.getIdByDotted mod.name moduleMapping of
         Nothing ->
             -- Impossible if we intern modules properly.
@@ -304,33 +306,59 @@ registerModule moduleMapping pkgName resolver mod =
                     , details = details
                     }
 
-                addBinding : VarName -> Elm.Type.Type -> StateM ()
-                addBinding name tipe =
-                    State.do (State.fromResult (Result.mapError toError (fromDocsType resolver tipe))) <| \monoType ->
-                    State.addGlobalBinding ( moduleId, pkgName, name ) (TypeI.closeOver monoType)
+                addBinding :
+                    Dict ( ModuleId, PackageName, VarName ) TypeAlias
+                    -> VarName
+                    -> Elm.Type.Type
+                    -> StateM ()
+                addBinding typeAliases name tipe =
+                    case fromDocsType resolver typeAliases tipe of
+                        Err error ->
+                            State.error (toError error)
+
+                        Ok monoType ->
+                            State.addGlobalBinding ( moduleId, pkgName, name ) (TypeI.closeOver monoType)
             in
-            State.do (State.traverseUnit (\v -> addBinding v.name v.tipe) mod.values) <| \() ->
-            State.do (State.traverseUnit (\b -> addBinding b.name b.tipe) mod.binops) <| \() ->
-            State.do (State.traverseUnit (\union -> registerUnion pkgName moduleId mod.name resolver union) mod.unions) <| \() ->
-            mod.aliases
-                |> State.foldl
-                    (\typeAlias acc ->
-                        State.map
-                            (\maybeRegisteredTypeAlias ->
-                                case maybeRegisteredTypeAlias of
-                                    Nothing ->
-                                        acc
+            State.do
+                (mod.aliases
+                    |> State.foldl
+                        (\typeAlias acc ->
+                            State.map
+                                (\maybeRegisteredTypeAlias ->
+                                    case maybeRegisteredTypeAlias of
+                                        Nothing ->
+                                            acc
 
-                                    Just ( typeAliasKey, registeredTypeAlias ) ->
-                                        Dict.insert typeAliasKey registeredTypeAlias acc
-                            )
-                            (registerAlias pkgName moduleId mod.name resolver typeAlias)
+                                        Just ( typeAliasKey, registeredTypeAlias ) ->
+                                            Dict.insert typeAliasKey registeredTypeAlias acc
+                                )
+                                (registerAlias pkgName moduleId mod.name resolver typeAlias acc)
+                        )
+                        typeAliasesNotIncludingThisModule
+                )
+            <| \typeAliases ->
+            State.do (State.traverseUnit (\v -> addBinding typeAliases v.name v.tipe) mod.values) <| \() ->
+            State.do (State.traverseUnit (\b -> addBinding typeAliases b.name b.tipe) mod.binops) <| \() ->
+            State.do
+                (State.traverseUnit
+                    (\union ->
+                        registerUnion pkgName moduleId mod.name resolver typeAliases union
                     )
-                    Dict.empty
+                    mod.unions
+                )
+            <| \() ->
+            State.pure typeAliases
 
 
-registerUnion : PackageName -> ModuleId -> String -> Resolver -> Elm.Docs.Union -> StateM ()
-registerUnion pkgName moduleId dottedModuleName resolver union =
+registerUnion :
+    PackageName
+    -> ModuleId
+    -> String
+    -> Resolver
+    -> Dict ( ModuleId, PackageName, VarName ) TypeAlias
+    -> Elm.Docs.Union
+    -> StateM ()
+registerUnion pkgName moduleId dottedModuleName resolver typeAliases union =
     let
         toError : ErrorDetails -> Error
         toError details =
@@ -345,19 +373,12 @@ registerUnion pkgName moduleId dottedModuleName resolver union =
 
         resultType : MonoType
         resultType =
-            -- We later expect eg. Bools in IfBlock conditions instead of
-            -- UserDefinedType "Bool"s, so let's collapse here
-            case TypeI.collapsePrimitive pkgName moduleId union.name args of
-                Just collapsed ->
-                    collapsed
-
-                Nothing ->
-                    UserDefinedType
-                        { package = pkgName
-                        , moduleId = moduleId
-                        , name = union.name
-                        , args = args
-                        }
+            UserDefinedType
+                { package = pkgName
+                , moduleId = moduleId
+                , name = union.name
+                , args = args
+                }
     in
     union.tags
         |> State.traverseUnit
@@ -366,7 +387,7 @@ registerUnion pkgName moduleId dottedModuleName resolver union =
                     (State.fromResult
                         (Result.mapError toError
                             (Result.Extra.combineMap
-                                (\argDocsType -> fromDocsType resolver argDocsType)
+                                (\argDocsType -> fromDocsType resolver typeAliases argDocsType)
                                 argTypeStrings
                             )
                         )
@@ -390,8 +411,9 @@ registerAlias :
     -> String
     -> Resolver
     -> Elm.Docs.Alias
+    -> Dict ( ModuleId, PackageName, VarName ) TypeAlias
     -> StateM (Maybe ( ( ModuleId, PackageName, VarName ), TypeAlias ))
-registerAlias pkgName moduleId dottedModuleName resolver alias_ =
+registerAlias pkgName moduleId dottedModuleName resolver alias_ typeAliases =
     let
         toError : ErrorDetails -> Error
         toError details =
@@ -400,13 +422,25 @@ registerAlias pkgName moduleId dottedModuleName resolver alias_ =
             , details = details
             }
     in
-    State.do (State.fromResult (Result.mapError toError (fromDocsType resolver alias_.tipe))) <| \aliasMono ->
+    State.do
+        (State.fromResult
+            (Result.mapError toError
+                (fromDocsType resolver typeAliases alias_.tipe)
+            )
+        )
+    <| \aliasMono ->
     let
         registerConstructor : StateM ()
         registerConstructor =
             case alias_.tipe of
                 Elm.Type.Record fields Nothing ->
-                    State.do (State.fromResult (Result.mapError toError (fromDocsFields resolver fields))) <| \resolvedFields ->
+                    State.do
+                        (State.fromResult
+                            (Result.mapError toError
+                                (fromDocsFields resolver typeAliases fields)
+                            )
+                        )
+                    <| \resolvedFields ->
                     let
                         ctorType : MonoType
                         ctorType =

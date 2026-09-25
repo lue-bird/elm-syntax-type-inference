@@ -12,12 +12,15 @@ import Elm.Syntax.File.Extra as FileExtra
 import Elm.Syntax.FullModuleName as FullModuleName
 import Elm.Syntax.ModuleName.Extra as ModuleNameExtra
 import Elm.Syntax.Node as Node
+import Elm.Syntax.TypeAlias
+import Elm.Syntax.TypeAnnotation.Extra
 import Elm.Type
 import Elm.TypeInference.Dependencies exposing (Dependencies)
 import Elm.TypeInference.Error exposing (Error)
 import Elm.TypeInference.ModuleIds as ModuleIds
 import Elm.TypeInference.ModuleIndex as ModuleIndex
 import Elm.TypeInference.ModuleLookup as ModuleLookup
+import Elm.TypeInference.SCC as SCC
 import Elm.TypeInference.State exposing (GlobalKey)
 import Elm.TypeInference.Type exposing (PackageName)
 import Elm.TypeInference.Type.Internal as TypeI
@@ -337,13 +340,43 @@ packageAliases moduleMapping deps package files =
                                     , moduleId
                                     )
                                 )
+
+                    fileTypeAliases : Dict String Elm.Syntax.TypeAlias.TypeAlias
+                    fileTypeAliases =
+                        file.declarations
+                            |> List.foldl
+                                (\node acc ->
+                                    case Node.value node of
+                                        Declaration.AliasDeclaration alias_ ->
+                                            Dict.insert (Node.value alias_.name) alias_ acc
+
+                                        _ ->
+                                            acc
+                                )
+                                Dict.empty
                 in
-                file.declarations
+                SCC.stronglyConnectedComponents
+                    (fileTypeAliases |> Dict.keys)
+                    (\node ->
+                        case Dict.get node fileTypeAliases of
+                            Nothing ->
+                                []
+
+                            Just alias_ ->
+                                Elm.Syntax.TypeAnnotation.Extra.referencesToTypesFromModuleId
+                                    resolver
+                                    thisModule.moduleId
+                                    (Node.value alias_.typeAnnotation)
+                    )
+                    -- TODO instead foldl on nested lists
+                    |> List.concat
                     |> Result.Extra.foldlWhileOk
                         (\node dict ->
-                            case Node.value node of
-                                Declaration.AliasDeclaration alias_ ->
-                                    TypeI.fromTypeAnnotation resolver (Node.value alias_.typeAnnotation)
+                            case Dict.get node fileTypeAliases of
+                                Just alias_ ->
+                                    TypeI.fromTypeAnnotation resolver
+                                        dict
+                                        (Node.value alias_.typeAnnotation)
                                         |> Result.mapError
                                             (\err ->
                                                 { moduleName = FullModuleName.toModuleName thisModule.moduleName
@@ -361,7 +394,7 @@ packageAliases moduleMapping deps package files =
                                                     dict
                                             )
 
-                                _ ->
+                                Nothing ->
                                     Ok dict
                         )
                         dictAcrossFiles

@@ -228,7 +228,7 @@ splitOffComponent : comparable -> List comparable -> ( List comparable, List com
 splitOffComponent v stack =
     case stack of
         [] ->
-            ( [], [] )
+            tupleListEmptyListEmpty
 
         x :: rest ->
             if x == v then
@@ -240,3 +240,8 @@ splitOffComponent v stack =
                         splitOffComponent v rest
                 in
                 ( x :: component, remaining )
+
+
+tupleListEmptyListEmpty : ( List a, List a )
+tupleListEmptyListEmpty =
+    ( [], [] )
