@@ -45,17 +45,20 @@ import Elm.Syntax.File exposing (File)
 import Elm.Syntax.File.Extra as FileExtra
 import Elm.Syntax.FullModuleName as FullModuleName exposing (FullModuleName)
 import Elm.Syntax.ModuleName exposing (ModuleName)
+import Elm.Syntax.ModuleName.Extra as ModuleNameExtra
 import Elm.Syntax.Node as Node exposing (Node(..))
 import Elm.Syntax.Signature exposing (Signature)
 import Elm.Syntax.Type as SyntaxType
 import Elm.Syntax.TypeAlias
 import Elm.Syntax.TypeAnnotation as TypeAnnotation
 import Elm.Syntax.TypeAnnotation.Extra
+import Elm.Type
 import Elm.TypeInference.BindingGroup as BindingGroup
 import Elm.TypeInference.Dependencies as Dependencies exposing (Dependencies)
 import Elm.TypeInference.DependencySources as DependencySources
 import Elm.TypeInference.Error exposing (Error, ErrorDetails(..))
 import Elm.TypeInference.Error.Internal exposing (FromTypeAnnotationError)
+import Elm.TypeInference.ImplicitImports as ImplicitImports
 import Elm.TypeInference.Infer as Infer
 import Elm.TypeInference.ModuleIds as ModuleIds exposing (ModuleId)
 import Elm.TypeInference.ModuleIndex as ModuleIndex exposing (ModuleIndex)
@@ -625,83 +628,663 @@ dependencyEnv { directDependencies, allDependencies, sourcesToResolveAmbiguity }
         deps =
             Dependencies.fromList allDependencies
 
-        directVisibleDeps : Dependencies
-        directVisibleDeps =
-            allDependencies
-                |> List.filter (\pkg -> List.member pkg.name directDependencies)
-                |> Dependencies.fromList
+        reachable : Set PackageName
+        reachable =
+            reachablePackages deps directDependencies
 
-        depModuleNames : List FullModuleName
-        depModuleNames =
-            (allDependencies
-                |> List.ExtraExtra.fastConcatMap (\pkg -> List.map (\m -> FullModuleName.fromDotted m.name) pkg.modules)
-            )
-                ++ (DependencySources.referencedModules deps
-                        |> List.map FullModuleName.fromDotted
-                   )
+        needed : Dict PackageName (List String)
+        needed =
+            DependencySources.neededSources deps sourcesToResolveAmbiguity
+                |> List.foldl
+                    (\( pkg, names ) acc ->
+                        if Set.member pkg reachable then
+                            Dict.insert pkg names acc
 
-        moduleMapping0 : ModuleIds.Mapping
-        moduleMapping0 =
-            List.foldl (\name acc -> ModuleIds.intern name acc |> Tuple.second) ModuleIds.empty depModuleNames
-
-        ( depIndex, moduleMapping1 ) =
-            ModuleLookup.buildIndex moduleMapping0 directVisibleDeps
-
-        baseEnv : Result Error DependencyEnv
-        baseEnv =
-            (State.do (Dependencies.register moduleMapping1 deps) <| \( depAliases, moduleMapping2 ) ->
-            State.do State.getGlobalEnv <| \globalEnv ->
-            State.pure <|
-                DependencyEnv
-                    { globalEnv = globalEnv
-                    , typeAliases = depAliases
-                    , index = depIndex
-                    , moduleMapping = moduleMapping2
-                    }
-            )
-                |> State.run State.empty
-                |> Tuple.first
+                        else
+                            acc
+                    )
+                    Dict.empty
     in
-    case baseEnv of
-        Err err ->
-            Failed err
+    if Dict.isEmpty needed then
+        let
+            depModuleNames : List FullModuleName
+            depModuleNames =
+                (allDependencies
+                    |> List.ExtraExtra.fastConcatMap (\pkg -> List.map (\m -> FullModuleName.fromDotted m.name) pkg.modules)
+                )
+                    ++ (DependencySources.referencedModules deps
+                            |> List.map FullModuleName.fromDotted
+                       )
 
-        Ok (DependencyEnv env) ->
-            let
-                reachable : Set PackageName
-                reachable =
-                    reachablePackages deps directDependencies
+            directVisibleDeps : Dependencies
+            directVisibleDeps =
+                allDependencies
+                    |> List.filter (\pkg -> List.member pkg.name directDependencies)
+                    |> Dependencies.fromList
 
-                needed : Dict PackageName (List String)
-                needed =
-                    DependencySources.neededSources deps sourcesToResolveAmbiguity
-                        |> List.foldl
-                            (\( pkg, names ) acc ->
-                                if Set.member pkg reachable then
-                                    Dict.insert pkg names acc
+            moduleMapping0 : ModuleIds.Mapping
+            moduleMapping0 =
+                List.foldl (\name acc -> ModuleIds.intern name acc |> Tuple.second) ModuleIds.empty depModuleNames
 
-                                else
-                                    acc
+            ( depIndex, moduleMapping1 ) =
+                ModuleLookup.buildIndex moduleMapping0 directVisibleDeps
+
+            moduleMapping2 : ModuleIds.Mapping
+            moduleMapping2 =
+                deps
+                    |> Dict.foldl
+                        (\_ item accAcrossDeps ->
+                            item.modules
+                                |> List.foldl
+                                    (\mod acc ->
+                                        ModuleIds.intern (FullModuleName.fromDotted mod.name) acc
+                                            |> Tuple.second
+                                    )
+                                    accAcrossDeps
+                        )
+                        moduleMapping1
+
+            baseEnv :
+                Result
+                    Error
+                    ( { globalEnv : Dict GlobalKey TypeI.Type
+                      , typeAliases : Dict GlobalKey TypeAlias
+                      , index : ModuleLookup.Index
+                      }
+                    , ModuleIds.Mapping
+                    )
+            baseEnv =
+                (State.do
+                    (deps
+                        |> Dict.toList
+                        |> State.foldl
+                            (\( pkgName, pkg ) ( accTypeAliases, accModuleMapping ) ->
+                                dependencyPackageEnv pkgName pkg deps sourcesToResolveAmbiguity accModuleMapping accTypeAliases
                             )
-                            Dict.empty
-            in
-            if Dict.isEmpty needed then
-                case DependencySources.aliases env.moduleMapping deps sourcesToResolveAmbiguity of
-                    Err err ->
-                        Failed err
+                            ( Dict.empty, moduleMapping2 )
+                    )
+                 <| \( depAliases, moduleMapping3 ) ->
+                 State.do State.getGlobalEnv <| \globalEnv ->
+                 State.pure <|
+                     ( { globalEnv = globalEnv
+                       , typeAliases = depAliases
+                       , index = depIndex
+                       }
+                     , moduleMapping3
+                     )
+                )
+                    |> State.run State.empty
+                    |> Tuple.first
+        in
+        case baseEnv of
+            Err err ->
+                Failed err
 
-                    Ok ( sourceAliases, moduleMapping2 ) ->
-                        Ready
-                            (DependencyEnv
-                                { globalEnv = env.globalEnv
-                                , index = env.index
-                                , typeAliases = Dict.union sourceAliases env.typeAliases
-                                , moduleMapping = moduleMapping2
+            Ok ( env, moduleMapping3 ) ->
+                Ready
+                    (DependencyEnv
+                        { globalEnv = env.globalEnv
+                        , index = env.index
+                        , typeAliases = env.typeAliases
+                        , moduleMapping = moduleMapping3
+                        }
+                    )
+
+    else
+        NeedPackageSources needed
+
+
+type alias TypeAliases =
+    Dict ( ModuleId, PackageName, VarName ) TypeAlias
+
+
+dependencyPackageEnv :
+    String
+    -> Dependencies.DependencyPackage
+    -> Dependencies
+    -> Dict String (List File)
+    -> ModuleIds.Mapping
+    -> TypeAliases
+    -> StateM ( TypeAliases, ModuleIds.Mapping )
+dependencyPackageEnv pkgName pkg deps sourcesToResolveAmbiguity accModuleMapping accTypeAliases =
+    -- TODO this assumes that all source files of a dependency
+    -- which needs source files are visited.
+    -- I think this assumption is wrong!
+    let
+        addModule : PackageName -> Elm.Docs.Module -> Dict String (List PackageName) -> Dict String (List PackageName)
+        addModule modulePkgName mod acc =
+            Dict.insert mod.name
+                (case Dict.get mod.name acc of
+                    Nothing ->
+                        [ modulePkgName ]
+
+                    Just byMod ->
+                        byMod ++ [ modulePkgName ]
+                )
+                acc
+
+        dependencyOwnersByModule : Dict String (List PackageName)
+        dependencyOwnersByModule =
+            pkg.dependencies
+                |> List.foldl
+                    (\searchPkgName accAcrossPks ->
+                        case Dict.get searchPkgName deps of
+                            Just searchPkg ->
+                                List.foldl (\mod acc -> addModule searchPkgName mod acc) accAcrossPks searchPkg.modules
+
+                            Nothing ->
+                                accAcrossPks
+                    )
+                    (List.foldl (\mod acc -> addModule pkgName mod acc) Dict.empty pkg.modules)
+
+        moduleNameOriginDependencyResolver : Dependencies.Resolver
+        moduleNameOriginDependencyResolver moduleNameStr =
+            if String.isEmpty moduleNameStr then
+                -- Impossible in principle (Elm compiler generates docs.json with fully qualified types).
+                -- Possible in practice (if somebody hand-crafts a docs.json file).
+                Err
+                    (AmbiguousModuleOwner
+                        { moduleName = moduleNameStr
+                        , possiblePackages = []
+                        }
+                    )
+
+            else
+                case ModuleIds.getIdByDotted moduleNameStr accModuleMapping of
+                    Nothing ->
+                        -- Impossible if we pre-intern docs modules properly.
+                        -- Possible if we have a bug.
+                        Err
+                            (AmbiguousModuleOwner
+                                { moduleName = moduleNameStr
+                                , possiblePackages = []
                                 }
                             )
 
-            else
-                NeedPackageSources needed
+                    Just moduleId ->
+                        case Dict.get moduleNameStr dependencyOwnersByModule |> Maybe.withDefault [] of
+                            [] ->
+                                Ok ( pkgName, moduleId )
+
+                            [ owner ] ->
+                                Ok ( owner, moduleId )
+
+                            matches ->
+                                Err <|
+                                    AmbiguousModuleOwner
+                                        { moduleName = moduleNameStr
+                                        , possiblePackages = matches
+                                        }
+
+        pkgDocsModulesDict : Dict String Elm.Docs.Module
+        pkgDocsModulesDict =
+            pkg.modules
+                |> List.foldl
+                    (\pkgModule acc ->
+                        Dict.insert pkgModule.name pkgModule acc
+                    )
+                    Dict.empty
+
+        sourceFiles : List File
+        sourceFiles =
+            Dict.get pkgName sourcesToResolveAmbiguity |> Maybe.withDefault []
+
+        ( sourceFileModuleIndexByModuleId, sourceFileAndModuleIndexByName, moduleMapping1 ) =
+            sourceFiles
+                |> List.foldl
+                    (\file ( acc, accSourceFileByName, acrossSourceFilesModuleMapping ) ->
+                        let
+                            ( moduleIndex, newModuleMapping ) =
+                                ModuleIndex.fromFile acrossSourceFilesModuleMapping file
+                        in
+                        ( Dict.insert moduleIndex.moduleId moduleIndex acc
+                        , Dict.insert (moduleIndex.moduleName |> FullModuleName.toString)
+                            ( file, moduleIndex )
+                            accSourceFileByName
+                        , newModuleMapping
+                        )
+                    )
+                    ( Dict.empty, Dict.empty, accModuleMapping )
+
+        moduleOriginLookupIndex : ModuleLookup.Index
+        moduleOriginLookupIndex =
+            deps
+                |> Dict.filter
+                    (\name _ ->
+                        name == pkgName || List.member name pkg.dependencies
+                    )
+                |> ModuleLookup.buildIndex moduleMapping1
+                |> Tuple.first
+    in
+    SCC.stronglyConnectedComponents
+        (Dict.foldl
+            (\sourceFileModuleNameString _ acc ->
+                if Dict.member sourceFileModuleNameString pkgDocsModulesDict then
+                    acc
+
+                else
+                    sourceFileModuleNameString :: acc
+            )
+            (Dict.keys pkgDocsModulesDict)
+            sourceFileAndModuleIndexByName
+        )
+        (\pkgModuleName ->
+            case Dict.get pkgModuleName pkgDocsModulesDict of
+                Nothing ->
+                    case Dict.get pkgModuleName sourceFileAndModuleIndexByName of
+                        Nothing ->
+                            []
+
+                        Just ( _, moduleIndex ) ->
+                            List.map (\import_ -> import_.dottedModuleName) moduleIndex.imports
+
+                Just pkgModule ->
+                    Dependencies.addDocsModuleRefsToList pkgModule [] |> List.map Tuple.first
+        )
+        -- TODO foldl nested instead
+        |> List.concat
+        |> State.foldl
+            (\modName acrossModulesTypeAliases ->
+                case Dict.get modName pkgDocsModulesDict of
+                    Just mod ->
+                        case ModuleIds.getIdByDotted modName moduleMapping1 of
+                            Nothing ->
+                                -- Impossible if we intern modules properly.
+                                -- Possible if we have a bug.
+                                State.error
+                                    { moduleName = ModuleNameExtra.fromDotted modName
+                                    , declarationNames = []
+                                    , details =
+                                        AmbiguousModuleOwner
+                                            { moduleName = modName
+                                            , possiblePackages = []
+                                            }
+                                    }
+
+                            Just moduleId ->
+                                let
+                                    toError : ErrorDetails -> Error
+                                    toError details =
+                                        { moduleName = ModuleNameExtra.fromDotted mod.name
+                                        , declarationNames = []
+                                        , details = details
+                                        }
+
+                                    addBinding :
+                                        TypeAliases
+                                        -> VarName
+                                        -> Elm.Type.Type
+                                        -> StateM ()
+                                    addBinding typeAliases name tipe =
+                                        case fromDocsType moduleNameOriginDependencyResolver typeAliases tipe of
+                                            Err error ->
+                                                State.error (toError error)
+
+                                            Ok monoType ->
+                                                State.addGlobalBinding ( moduleId, pkgName, name ) (TypeI.closeOver monoType)
+                                in
+                                State.do
+                                    (case Dict.get modName sourceFileAndModuleIndexByName of
+                                        Just ( sourceFile, thisModule ) ->
+                                            dependencyPackageModuleSourceTypeAliases
+                                                pkgName
+                                                moduleMapping1
+                                                moduleOriginLookupIndex
+                                                sourceFileModuleIndexByModuleId
+                                                thisModule
+                                                sourceFile
+                                                acrossModulesTypeAliases
+                                                |> State.fromResult
+
+                                        Nothing ->
+                                            mod.aliases
+                                                |> State.foldl
+                                                    (\typeAlias acc ->
+                                                        State.map
+                                                            (\maybeRegisteredTypeAlias ->
+                                                                case maybeRegisteredTypeAlias of
+                                                                    Nothing ->
+                                                                        acc
+
+                                                                    Just ( typeAliasKey, registeredTypeAlias ) ->
+                                                                        Dict.insert typeAliasKey registeredTypeAlias acc
+                                                            )
+                                                            (registerDocsAlias pkgName moduleId mod.name moduleNameOriginDependencyResolver typeAlias acc)
+                                                    )
+                                                    acrossModulesTypeAliases
+                                    )
+                                <| \typeAliasesIncludingMod ->
+                                State.do (State.traverseUnit (\v -> addBinding typeAliasesIncludingMod v.name v.tipe) mod.values) <| \() ->
+                                State.do (State.traverseUnit (\b -> addBinding typeAliasesIncludingMod b.name b.tipe) mod.binops) <| \() ->
+                                State.do
+                                    (State.traverseUnit
+                                        (\union ->
+                                            registerDocsUnion pkgName moduleId mod.name moduleNameOriginDependencyResolver typeAliasesIncludingMod union
+                                        )
+                                        mod.unions
+                                    )
+                                <| \() ->
+                                if pkgName == ImplicitImports.elmCorePackage then
+                                    -- overwrite types of True and False, the only 2 variants where the result is not a UserDefinedType
+                                    State.do
+                                        (State.addGlobalBinding
+                                            ( ModuleIds.basicsId, ImplicitImports.elmCorePackage, "True" )
+                                            (TypeI.closeOver TypeI.Bool)
+                                        )
+                                    <| \() ->
+                                    State.do
+                                        (State.addGlobalBinding
+                                            ( ModuleIds.basicsId, ImplicitImports.elmCorePackage, "False" )
+                                            (TypeI.closeOver TypeI.Bool)
+                                        )
+                                    <| \() ->
+                                    State.pure typeAliasesIncludingMod
+
+                                else
+                                    State.pure typeAliasesIncludingMod
+
+                    Nothing ->
+                        case Dict.get modName sourceFileAndModuleIndexByName of
+                            Just ( sourceFile, thisModule ) ->
+                                dependencyPackageModuleSourceTypeAliases
+                                    pkgName
+                                    moduleMapping1
+                                    moduleOriginLookupIndex
+                                    sourceFileModuleIndexByModuleId
+                                    thisModule
+                                    sourceFile
+                                    acrossModulesTypeAliases
+                                    |> State.fromResult
+
+                            Nothing ->
+                                State.pure acrossModulesTypeAliases
+            )
+            accTypeAliases
+        |> State.map (\aliases -> ( aliases, moduleMapping1 ))
+
+
+dependencyPackageModuleSourceTypeAliases :
+    String
+    -> ModuleIds.Mapping
+    -> ModuleLookup.Index
+    -> Dict ModuleId ModuleIndex
+    -> ModuleIndex
+    -> File
+    -> TypeAliases
+    -> Result Error TypeAliases
+dependencyPackageModuleSourceTypeAliases pkgName moduleMapping1 moduleOriginLookupIndex sourceFileModuleIndexByModuleId thisModule sourceFile acrossModulesTypeAliases =
+    let
+        typeOriginResolver : TypeI.TypeResolver
+        typeOriginResolver qualifier name =
+            ModuleLookup.typeResolverFor moduleMapping1 moduleOriginLookupIndex sourceFileModuleIndexByModuleId thisModule qualifier name
+                |> Result.map
+                    (\( owner, lookupModuleId ) ->
+                        ( if owner == "" then
+                            pkgName
+
+                          else
+                            owner
+                        , lookupModuleId
+                        )
+                    )
+
+        fileTypeAliases : Dict String Elm.Syntax.TypeAlias.TypeAlias
+        fileTypeAliases =
+            sourceFile.declarations
+                |> List.foldl
+                    (\node accFileTypeAliases ->
+                        case Node.value node of
+                            Declaration.AliasDeclaration alias_ ->
+                                Dict.insert (Node.value alias_.name) alias_ accFileTypeAliases
+
+                            _ ->
+                                accFileTypeAliases
+                    )
+                    Dict.empty
+    in
+    SCC.stronglyConnectedComponents
+        (fileTypeAliases |> Dict.keys)
+        (\node ->
+            case Dict.get node fileTypeAliases of
+                Nothing ->
+                    []
+
+                Just alias_ ->
+                    Elm.Syntax.TypeAnnotation.Extra.referencesToTypesFromModuleId
+                        typeOriginResolver
+                        thisModule.moduleId
+                        (Node.value alias_.typeAnnotation)
+        )
+        -- TODO instead foldl on nested lists
+        |> List.concat
+        |> Result.Extra.foldlWhileOk
+            (\node dict ->
+                case Dict.get node fileTypeAliases of
+                    Just alias_ ->
+                        TypeI.fromTypeAnnotation typeOriginResolver
+                            dict
+                            (Node.value alias_.typeAnnotation)
+                            |> Result.mapError
+                                (\err ->
+                                    { moduleName = FullModuleName.toModuleName thisModule.moduleName
+                                    , declarationNames = [ Node.value alias_.name ]
+                                    , details = TypeI.fromTypeAnnotationError err
+                                    }
+                                )
+                            |> Result.map
+                                (\body ->
+                                    Dict.insert
+                                        ( thisModule.moduleId, pkgName, Node.value alias_.name )
+                                        { args = List.map (\(Node.Node _ generic) -> TypeVar.parse generic) alias_.generics
+                                        , type_ = body
+                                        }
+                                        dict
+                                )
+
+                    Nothing ->
+                        Ok dict
+            )
+            acrossModulesTypeAliases
+
+
+registerDocsUnion :
+    PackageName
+    -> ModuleId
+    -> String
+    -> Dependencies.Resolver
+    -> TypeAliases
+    -> Elm.Docs.Union
+    -> StateM ()
+registerDocsUnion pkgName moduleId dottedModuleName resolver typeAliases union =
+    let
+        toError : ErrorDetails -> Error
+        toError details =
+            { moduleName = ModuleNameExtra.fromDotted dottedModuleName
+            , declarationNames = []
+            , details = details
+            }
+
+        args : List MonoType
+        args =
+            union.args |> List.map (\argName -> TypeVar (TypeVar.parse argName))
+
+        resultType : MonoType
+        resultType =
+            UserDefinedType
+                { package = pkgName
+                , moduleId = moduleId
+                , name = union.name
+                , args = args
+                }
+    in
+    union.tags
+        |> State.traverseUnit
+            (\( ctorName, argTypeStrings ) ->
+                State.do
+                    (State.fromResult
+                        (Result.mapError toError
+                            (Result.Extra.combineMap
+                                (\argDocsType -> fromDocsType resolver typeAliases argDocsType)
+                                argTypeStrings
+                            )
+                        )
+                    )
+                <| \argTypes ->
+                let
+                    ctorType : MonoType
+                    ctorType =
+                        argTypes
+                            |> List.foldr (\argT acc -> Function { from = argT, to = acc }) resultType
+                in
+                State.addGlobalBinding ( moduleId, pkgName, ctorName ) (TypeI.closeOver ctorType)
+            )
+
+
+{-| A record type definition gets a constructor function as well
+-}
+registerDocsAlias :
+    PackageName
+    -> ModuleId
+    -> String
+    -> Dependencies.Resolver
+    -> Elm.Docs.Alias
+    -> TypeAliases
+    -> StateM (Maybe ( ( ModuleId, PackageName, VarName ), TypeAlias ))
+registerDocsAlias pkgName moduleId dottedModuleName resolver alias_ typeAliases =
+    let
+        toError : ErrorDetails -> Error
+        toError details =
+            { moduleName = ModuleNameExtra.fromDotted dottedModuleName
+            , declarationNames = []
+            , details = details
+            }
+    in
+    State.do
+        (State.fromResult
+            (Result.mapError toError
+                (fromDocsType resolver typeAliases alias_.tipe)
+            )
+        )
+    <| \aliasMono ->
+    let
+        registerConstructor : StateM ()
+        registerConstructor =
+            case alias_.tipe of
+                Elm.Type.Record fields Nothing ->
+                    State.do
+                        (State.fromResult
+                            (Result.mapError toError
+                                (fromDocsFields resolver typeAliases fields)
+                            )
+                        )
+                    <| \resolvedFields ->
+                    let
+                        ctorType : MonoType
+                        ctorType =
+                            List.foldr
+                                (\( _, fieldT ) acc -> Function { from = fieldT, to = acc })
+                                aliasMono
+                                resolvedFields
+                    in
+                    State.addGlobalBinding ( moduleId, pkgName, alias_.name ) (TypeI.closeOver ctorType)
+
+                _ ->
+                    State.pureUnit
+    in
+    State.do registerConstructor <| \() ->
+    State.pure <|
+        Just
+            ( ( moduleId, pkgName, alias_.name )
+            , { args = List.map TypeVar.parse alias_.args, type_ = aliasMono }
+            )
+
+
+fromDocsType :
+    Dependencies.Resolver
+    -> TypeAliases
+    -> Elm.Type.Type
+    -> Result ErrorDetails MonoType
+fromDocsType resolver typeAliases type_ =
+    case type_ of
+        Elm.Type.Var name ->
+            Ok (TypeVar (TypeVar.parse name))
+
+        Elm.Type.Lambda from to ->
+            Result.map2 (\f t -> Function { from = f, to = t })
+                (fromDocsType resolver typeAliases from)
+                (fromDocsType resolver typeAliases to)
+
+        Elm.Type.Tuple [] ->
+            Ok Unit
+
+        Elm.Type.Tuple [ a, b ] ->
+            Result.map2 Tuple2
+                (fromDocsType resolver typeAliases a)
+                (fromDocsType resolver typeAliases b)
+
+        Elm.Type.Tuple [ a, b, c ] ->
+            Result.map3 Tuple3
+                (fromDocsType resolver typeAliases a)
+                (fromDocsType resolver typeAliases b)
+                (fromDocsType resolver typeAliases c)
+
+        Elm.Type.Tuple _ ->
+            Err (ImpossibleDocsType type_)
+
+        Elm.Type.Type qualifiedName args ->
+            let
+                ( moduleNameStr, typeName ) =
+                    ModuleNameExtra.splitLastDot qualifiedName
+            in
+            Result.map2
+                (\( package, moduleId ) argTypes ->
+                    TypeI.fromTyped typeAliases package moduleId typeName argTypes
+                )
+                (resolver moduleNameStr)
+                (Result.Extra.combineMap (\arg -> fromDocsType resolver typeAliases arg) args)
+
+        Elm.Type.Record fields Nothing ->
+            dictFromDocsFields resolver typeAliases fields
+                |> Result.map Record
+
+        Elm.Type.Record fields (Just rowVar) ->
+            dictFromDocsFields resolver typeAliases fields
+                |> Result.map
+                    (\resolvedFields ->
+                        ExtensibleRecord
+                            { extensionTypevar = TypeVar (TypeVar.parse rowVar)
+                            , fields = resolvedFields
+                            }
+                    )
+
+
+dictFromDocsFields :
+    Dependencies.Resolver
+    -> TypeAliases
+    -> List ( String, Elm.Type.Type )
+    -> Result ErrorDetails (Dict String MonoType)
+dictFromDocsFields resolver typeAliases fields =
+    Result.Extra.foldlWhileOk
+        (\( name, value ) acc ->
+            fromDocsType resolver typeAliases value
+                |> Result.map (\valueType -> Dict.insert name valueType acc)
+        )
+        Dict.empty
+        fields
+
+
+fromDocsFields :
+    Dependencies.Resolver
+    -> TypeAliases
+    -> List ( String, Elm.Type.Type )
+    -> Result ErrorDetails (List ( String, MonoType ))
+fromDocsFields resolver typeAliases fields =
+    Result.Extra.combineMap
+        (\( name, value ) ->
+            fromDocsType resolver typeAliases value
+                |> Result.map (\valueType -> ( name, valueType ))
+        )
+        fields
 
 
 reachablePackages : Dependencies -> List PackageName -> Set PackageName
@@ -965,7 +1548,6 @@ moduleResult ctx file typeAliases =
                         (\( moduleId, _, _ ) _ ->
                             ModuleIds.equal moduleId ctx.thisIndex.moduleId
                         )
-                    |> Debug.log "interface.typeAliases"
             }
         }
 

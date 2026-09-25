@@ -1,4 +1,4 @@
-module Elm.TypeInference.DependencySources exposing (aliases, neededSources, referencedModules)
+module Elm.TypeInference.DependencySources exposing (neededSources, referencedModules)
 
 {-| Get type alias bodies from dependency source files.
 We need the alias bodies to know if they're records or unions, for type inference later.
@@ -6,46 +6,12 @@ We need the alias bodies to know if they're records or unions, for type inferenc
 
 import Dict exposing (Dict)
 import Elm.Docs
-import Elm.Syntax.Declaration as Declaration
 import Elm.Syntax.File exposing (File)
 import Elm.Syntax.File.Extra as FileExtra
-import Elm.Syntax.FullModuleName as FullModuleName
 import Elm.Syntax.ModuleName.Extra as ModuleNameExtra
-import Elm.Syntax.Node as Node
-import Elm.Syntax.TypeAlias
-import Elm.Syntax.TypeAnnotation.Extra
-import Elm.Type
-import Elm.TypeInference.Dependencies exposing (Dependencies)
-import Elm.TypeInference.Error exposing (Error)
-import Elm.TypeInference.ModuleIds as ModuleIds
-import Elm.TypeInference.ModuleIndex as ModuleIndex
-import Elm.TypeInference.ModuleLookup as ModuleLookup
-import Elm.TypeInference.SCC as SCC
-import Elm.TypeInference.State exposing (GlobalKey)
+import Elm.TypeInference.Dependencies as Dependencies exposing (Dependencies)
 import Elm.TypeInference.Type exposing (PackageName)
-import Elm.TypeInference.Type.Internal as TypeI
-import Elm.TypeInference.TypeVar as TypeVar
-import Elm.TypeInference.Unify exposing (TypeAlias)
-import Result.Extra
 import Set exposing (Set)
-
-
-aliases : ModuleIds.Mapping -> Dependencies -> Dict PackageName (List File) -> Result Error ( Dict GlobalKey TypeAlias, ModuleIds.Mapping )
-aliases moduleMapping deps sources =
-    Dict.foldl
-        (\package files accResult ->
-            accResult
-                |> Result.andThen
-                    (\( accDict, accModuleMapping ) ->
-                        packageAliases accModuleMapping deps package files
-                            |> Result.map
-                                (\( pkgDict, newModuleMapping ) ->
-                                    ( Dict.union pkgDict accDict, newModuleMapping )
-                                )
-                    )
-        )
-        (Ok ( Dict.empty, moduleMapping ))
-        sources
 
 
 {-| Every dotted module name referenced anywhere in docs.json types.
@@ -69,7 +35,13 @@ referencedModules deps =
             else
                 name :: names
     in
-    List.foldl (\( name, _ ) acc -> addNameIfUnique name acc) [] (docsModuleRefs allModules)
+    List.foldl (\( name, _ ) acc -> addNameIfUnique name acc)
+        []
+        (List.foldl
+            (\mod acc -> Dependencies.addDocsModuleRefsToList mod acc)
+            []
+            allModules
+        )
         |> (\accWithoutModNames ->
                 List.foldl (\mod acc -> addNameIfUnique mod.name acc) accWithoutModNames allModules
            )
@@ -123,7 +95,10 @@ neededSources deps sources =
 
                     remaining : Set String
                     remaining =
-                        docsModuleRefs pkg.modules
+                        pkg.modules
+                            |> List.foldl
+                                (\mod acc -> Dependencies.addDocsModuleRefsToList mod acc)
+                                []
                             |> List.foldl
                                 (\(( m, _ ) as ref) acc ->
                                     if isKnownRef docsTypes ref || Set.member m supplied then
@@ -182,222 +157,3 @@ isKnownRef docsTypes ( moduleName, typeName ) =
 
         Just typeNames ->
             Set.member typeName typeNames
-
-
-docsModuleRefs : List Elm.Docs.Module -> List ( String, String )
-docsModuleRefs modules =
-    modules
-        |> List.foldl
-            (\mod accAcrossModules ->
-                List.foldl (\value acc -> acc |> addDocsTypeRefsToList value.tipe)
-                    accAcrossModules
-                    mod.values
-                    |> (\acc ->
-                            List.foldl
-                                (\binop accAcrossBinops -> accAcrossBinops |> addDocsTypeRefsToList binop.tipe)
-                                acc
-                                mod.binops
-                       )
-                    |> (\acc ->
-                            List.foldl
-                                (\union accAcrossUnions ->
-                                    List.foldl
-                                        (\( _, payload ) accAcrossPayloads ->
-                                            List.foldl addDocsTypeRefsToList accAcrossPayloads payload
-                                        )
-                                        accAcrossUnions
-                                        union.tags
-                                )
-                                acc
-                                mod.unions
-                       )
-                    |> (\acc ->
-                            List.foldl
-                                (\typeAlias accAcrossTypeAliases -> addDocsTypeRefsToList typeAlias.tipe accAcrossTypeAliases)
-                                acc
-                                mod.aliases
-                       )
-            )
-            []
-
-
-addDocsTypeRefsToList : Elm.Type.Type -> List ( String, String ) -> List ( String, String )
-addDocsTypeRefsToList tipe acc =
-    case tipe of
-        Elm.Type.Var _ ->
-            acc
-
-        Elm.Type.Lambda from to ->
-            addDocsTypeRefsToList from (addDocsTypeRefsToList to acc)
-
-        Elm.Type.Tuple parts ->
-            List.foldl addDocsTypeRefsToList acc parts
-
-        Elm.Type.Type qualifiedName args ->
-            let
-                ( moduleName, typeName ) =
-                    ModuleNameExtra.splitLastDot qualifiedName
-
-                accAndArgsRefs : List ( String, String )
-                accAndArgsRefs =
-                    List.foldl addDocsTypeRefsToList acc args
-            in
-            -- Skip elm/core stuff
-            if isPrimitiveRef moduleName typeName then
-                accAndArgsRefs
-
-            else if String.isEmpty moduleName then
-                accAndArgsRefs
-
-            else
-                ( moduleName, typeName ) :: accAndArgsRefs
-
-        Elm.Type.Record fields _ ->
-            List.foldl
-                (\( _, value ) accAcrossFields -> accAcrossFields |> addDocsTypeRefsToList value)
-                acc
-                fields
-
-
-isPrimitiveRef : String -> String -> Bool
-isPrimitiveRef moduleName typeName =
-    case moduleName of
-        "Basics" ->
-            case typeName of
-                "Int" ->
-                    True
-
-                "Float" ->
-                    True
-
-                "Bool" ->
-                    True
-
-                _ ->
-                    False
-
-        "Char" ->
-            typeName == "Char"
-
-        "String" ->
-            typeName == "String"
-
-        "List" ->
-            typeName == "List"
-
-        _ ->
-            False
-
-
-packageAliases :
-    ModuleIds.Mapping
-    -> Dependencies
-    -> PackageName
-    -> List File
-    -> Result Error ( Dict GlobalKey TypeAlias, ModuleIds.Mapping )
-packageAliases moduleMapping deps package files =
-    let
-        ( modules, moduleMapping1 ) =
-            files
-                |> List.foldl
-                    (\file ( acc, accModuleMapping ) ->
-                        let
-                            ( moduleIndex, newModuleMapping ) =
-                                ModuleIndex.fromFile accModuleMapping file
-                        in
-                        ( Dict.insert moduleIndex.moduleId moduleIndex acc, newModuleMapping )
-                    )
-                    ( Dict.empty, moduleMapping )
-
-        visiblePackages : List PackageName
-        visiblePackages =
-            package :: (Dict.get package deps |> Maybe.map .dependencies |> Maybe.withDefault [])
-
-        index : ModuleLookup.Index
-        index =
-            deps
-                |> Dict.filter (\name _ -> List.member name visiblePackages)
-                |> ModuleLookup.buildIndex moduleMapping1
-                |> Tuple.first
-    in
-    files
-        |> Result.Extra.foldlWhileOk
-            (\file dictAcrossFiles ->
-                let
-                    ( thisModule, _ ) =
-                        ModuleIndex.fromFile moduleMapping1 file
-
-                    resolver : TypeI.TypeResolver
-                    resolver qualifier name =
-                        ModuleLookup.typeResolverFor moduleMapping1 index modules thisModule qualifier name
-                            |> Result.map
-                                (\( owner, moduleId ) ->
-                                    ( if owner == "" then
-                                        package
-
-                                      else
-                                        owner
-                                    , moduleId
-                                    )
-                                )
-
-                    fileTypeAliases : Dict String Elm.Syntax.TypeAlias.TypeAlias
-                    fileTypeAliases =
-                        file.declarations
-                            |> List.foldl
-                                (\node acc ->
-                                    case Node.value node of
-                                        Declaration.AliasDeclaration alias_ ->
-                                            Dict.insert (Node.value alias_.name) alias_ acc
-
-                                        _ ->
-                                            acc
-                                )
-                                Dict.empty
-                in
-                SCC.stronglyConnectedComponents
-                    (fileTypeAliases |> Dict.keys)
-                    (\node ->
-                        case Dict.get node fileTypeAliases of
-                            Nothing ->
-                                []
-
-                            Just alias_ ->
-                                Elm.Syntax.TypeAnnotation.Extra.referencesToTypesFromModuleId
-                                    resolver
-                                    thisModule.moduleId
-                                    (Node.value alias_.typeAnnotation)
-                    )
-                    -- TODO instead foldl on nested lists
-                    |> List.concat
-                    |> Result.Extra.foldlWhileOk
-                        (\node dict ->
-                            case Dict.get node fileTypeAliases of
-                                Just alias_ ->
-                                    TypeI.fromTypeAnnotation resolver
-                                        dict
-                                        (Node.value alias_.typeAnnotation)
-                                        |> Result.mapError
-                                            (\err ->
-                                                { moduleName = FullModuleName.toModuleName thisModule.moduleName
-                                                , declarationNames = [ Node.value alias_.name ]
-                                                , details = TypeI.fromTypeAnnotationError err
-                                                }
-                                            )
-                                        |> Result.map
-                                            (\body ->
-                                                Dict.insert
-                                                    ( thisModule.moduleId, package, Node.value alias_.name )
-                                                    { args = List.map (\(Node.Node _ generic) -> TypeVar.parse generic) alias_.generics
-                                                    , type_ = body
-                                                    }
-                                                    dict
-                                            )
-
-                                Nothing ->
-                                    Ok dict
-                        )
-                        dictAcrossFiles
-            )
-            Dict.empty
-        |> Result.map (\dict -> ( dict, moduleMapping1 ))

@@ -24,6 +24,7 @@ core =
         , platformCmd
         , char
         , dict
+        , debug
         ]
     }
 
@@ -53,6 +54,7 @@ basics =
     , values =
         [ { name = "identity", comment = "", tipe = Lambda (Var "a") (Var "a") }
         , { name = "e", comment = "", tipe = Type "Basics.Float" [] }
+        , { name = "compare", comment = "", tipe = Lambda (Var "comparable") (Lambda (Var "comparable") (Type "Basics.Order" [])) }
         ]
     , binops =
         [ { name = "+"
@@ -198,6 +200,22 @@ dict =
                         (Type "Dict.Dict" [ Var "k", Var "v1" ])
                         (Type "Dict.Dict" [ Var "k", Var "v2" ])
                     )
+          }
+        ]
+    , binops = []
+    }
+
+
+debug : Elm.Docs.Module
+debug =
+    { name = "Debug"
+    , comment = ""
+    , unions = []
+    , aliases = []
+    , values =
+        [ { name = "todo"
+          , comment = ""
+          , tipe = Lambda (Type "String.String" []) (Var "a")
           }
         ]
     , binops = []

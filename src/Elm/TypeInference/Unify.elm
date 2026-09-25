@@ -436,34 +436,29 @@ unifyMono cfg t1 t2 =
                 _ ->
                     typeMismatch cfg t1 t2
 
-        UserDefinedType ut1Raw ->
-            case TypeI.userDefinedTypeExpandAliasAndCollapse cfg.typeAliases ut1Raw of
-                (UserDefinedType ut1) as t1Expanded ->
-                    case TypeI.expandAliasAndCollapse cfg.typeAliases t2 of
-                        TypeVar v ->
-                            bind cfg v t1Expanded
+        UserDefinedType ut1 ->
+            case t2 of
+                TypeVar v ->
+                    bind cfg v t1
 
-                        UserDefinedType ut2 ->
-                            if
-                                (ut1.package /= ut2.package)
-                                    || ModuleIds.notEqual ut1.moduleId ut2.moduleId
-                                    || (ut1.name /= ut2.name)
-                            then
+                UserDefinedType ut2 ->
+                    if
+                        (ut1.package /= ut2.package)
+                            || ModuleIds.notEqual ut1.moduleId ut2.moduleId
+                            || (ut1.name /= ut2.name)
+                    then
+                        typeMismatch cfg t1 t2
+
+                    else
+                        case List.ExtraExtra.zipOrNothingIfLengthsDiffer ut1.args ut2.args of
+                            Nothing ->
                                 typeMismatch cfg t1 t2
 
-                            else
-                                case List.ExtraExtra.map2OrNothingIfLengthsDiffer ut1.args ut2.args of
-                                    Nothing ->
-                                        typeMismatch cfg t1 t2
+                            Just eqs ->
+                                unifyMany cfg eqs
 
-                                    Just eqs ->
-                                        unifyMany cfg eqs
-
-                        _ ->
-                            typeMismatch cfg t1 t2
-
-                t1Expanded ->
-                    unifyMono cfg t1Expanded t2
+                _ ->
+                    typeMismatch cfg t1 t2
 
         WebGLShader webgl1 ->
             case t2 of

@@ -1,4 +1,4 @@
-module List.ExtraExtra exposing (fastConcatMap, fastConcatMapWithInitial, findLastMap, map2OrNothingIfLengthsDiffer)
+module List.ExtraExtra exposing (fastConcatMap, fastConcatMapWithInitial, findLastMap, zipOrNothingIfLengthsDiffer)
 
 {-| -}
 
@@ -36,8 +36,8 @@ fastConcatMapWithInitial fn list initial =
     List.foldr (\item acc -> fn item ++ acc) initial list
 
 
-map2OrNothingIfLengthsDiffer : List a -> List b -> Maybe (List ( a, b ))
-map2OrNothingIfLengthsDiffer args1 args2 =
+zipOrNothingIfLengthsDiffer : List a -> List b -> Maybe (List ( a, b ))
+zipOrNothingIfLengthsDiffer args1 args2 =
     case args1 of
         [] ->
             case args2 of
@@ -50,7 +50,7 @@ map2OrNothingIfLengthsDiffer args1 args2 =
         a1 :: rest1 ->
             case args2 of
                 a2 :: rest2 ->
-                    case map2OrNothingIfLengthsDiffer rest1 rest2 of
+                    case zipOrNothingIfLengthsDiffer rest1 rest2 of
                         Just lst ->
                             Just (( a1, a2 ) :: lst)
 

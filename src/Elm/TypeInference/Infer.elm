@@ -341,10 +341,6 @@ functionMember ctx declNode fn installFor =
 -}
 topLevelMember : Ctx -> Node Declaration -> Expression.Function -> StateM BindingGroup.Member
 topLevelMember ctx declNode fn =
-    let
-        _ =
-            Debug.log "solve top level function" ( fn.declaration |> Node.value |> .name |> Node.value, ctx.typeAliases )
-    in
     functionMember
         ctx
         declNode

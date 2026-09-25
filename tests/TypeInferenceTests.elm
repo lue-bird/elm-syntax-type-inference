@@ -2449,43 +2449,61 @@ unifyAliasSuite =
     in
     Test.describe "Unify: type alias expansion"
         [ Test.test "a Pair Float unifies with (Float, Float)" <| \() ->
-        run
-            [ ( pairOf TypeI.Float
-              , TypeI.Tuple2 (generatedVar 0) (generatedVar 1)
-              )
-            ]
-            |> Result.map
-                (\subst ->
-                    let
-                        ( res, _, _ ) =
-                            SubstitutionMap.substituteMono
-                                subst
-                                (TypeI.Tuple2 (generatedVar 0) (generatedVar 1))
-                    in
-                    res
-                )
-            |> Expect.equal (Ok (TypeI.Tuple2 TypeI.Float TypeI.Float))
-        , Test.test "two different uses of the same alias don't leak into each other" <| \() ->
-        run
-            [ ( pairOf TypeI.Float
-              , TypeI.Tuple2 (generatedVar 0) (generatedVar 1)
-              )
-            , ( pairOf TypeI.Char
-              , TypeI.Tuple2 (generatedVar 2) (generatedVar 3)
-              )
-            ]
-            |> Result.map
-                (\subst ->
-                    let
-                        ( res0, _, _ ) =
-                            SubstitutionMap.substituteMono subst (generatedVar 0)
+        let
+            modules : Dict ModuleName String
+            modules =
+                Dict.singleton [ "Main" ]
+                    """
+module Main exposing (main)
 
-                        ( res2, _, _ ) =
-                            SubstitutionMap.substituteMono subst (generatedVar 2)
-                    in
-                    ( res0, res2 )
-                )
-            |> Expect.equal (Ok ( TypeI.Float, TypeI.Char ))
+type alias PairOf side =
+    ( side, side )
+
+main =
+    [ pair, tupleFree ]
+
+pair : PairOf Float
+pair =
+    ( 1.1, 2.2 )
+
+tupleFree : ( a, b )
+tupleFree =
+    Debug.todo ""
+"""
+                in
+                getDeclTypeWithDeps [ CoreFixture.core ] modules [ "Main" ] "main"
+                    |> Result.map Type.toString
+                    |> Expect.equal (Ok "List ( Float, Float )")
+        , Test.test "two different uses of the same alias don't leak into each other" <| \() ->
+        let
+            modules : Dict ModuleName String
+            modules =
+                Dict.singleton [ "Main" ]
+                    """
+module Main exposing (main)
+
+type alias PairOf side =
+    ( side, side )
+
+main =
+    ( [ pairFloat, tupleFree ], [ pairChar, tupleFree ] )
+
+pairFloat : PairOf Float
+pairFloat =
+    ( 1.1, 2.2 )
+
+pairChar : PairOf Char
+pairChar =
+    ( '1', '2' )
+
+tupleFree : ( a, b )
+tupleFree =
+    Debug.todo ""
+"""
+                in
+                getDeclTypeWithDeps [ CoreFixture.core ] modules [ "Main" ] "main"
+                    |> Result.map Type.toString
+                    |> Expect.equal (Ok "( List ( Float, Float ), List ( Char, Char ) )")
         , Test.test "a Pair Float does not unify with (Float, Char)" <| \() ->
         run
             [ ( pairOf TypeI.Float
@@ -2568,35 +2586,22 @@ nestedExtensibleAliasRegression =
 comparableAliasedTupleRegression : Test
 comparableAliasedTupleRegression =
     let
-        moduleNameAlias : Unify.TypeAlias
-        moduleNameAlias =
-            { args = []
-            , type_ = TypeI.List TypeI.String
-            }
+        modules : Dict ModuleName String
+        modules =
+            Dict.singleton [ "Main" ]
+                """
+module Main exposing (main)
 
-        typeAliases : Dict ( ModuleId, PackageName, String ) TypeAlias
-        typeAliases =
-            Dict.singleton ( mainModuleId, "", "ModuleName" ) moduleNameAlias
+type alias ModuleName =
+    List String
 
-        moduleNameType : MonoType
-        moduleNameType =
-            TypeI.UserDefinedType
-                { package = ""
-                , moduleId = mainModuleId
-                , name = "ModuleName"
-                , args = []
-                }
-
-        comparableVar : MonoType
-        comparableVar =
-            TypeI.TypeVar ( TypeVar.Generated 0, TypeVar.Comparable )
+main : ( ModuleName, String ) -> Order
+main qualified =
+    compare qualified qualified
+"""
     in
     Test.test "a Tuple2 with an aliased (List String) element unifies with a `comparable` var" <| \() ->
-    runUnify typeAliases
-        [ ( comparableVar
-          , TypeI.Tuple2 moduleNameType TypeI.String
-          )
-        ]
+    getDeclTypeWithDeps [ CoreFixture.core ] modules [ "Main" ] "main"
         |> Result.map (always ())
         |> Expect.equal (Ok ())
 

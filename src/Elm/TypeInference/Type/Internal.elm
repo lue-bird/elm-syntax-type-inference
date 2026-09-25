@@ -20,7 +20,6 @@ module Elm.TypeInference.Type.Internal exposing
     , normalizeToMonoPublicKeyAlpha
     , number_
     , renameToAnnotation
-    , userDefinedTypeExpandAliasAndCollapse
     )
 
 import Dict exposing (Dict)
@@ -649,10 +648,6 @@ types can shadow implicit names such as List, Int, and String.
 -}
 fromTyped : TypeAliases -> String -> ModuleId -> String -> List MonoType -> MonoType
 fromTyped typeAliases package moduleId typeName argTypes =
-    let
-        _ =
-            Debug.log "from Typed type annotation" ( package, moduleId, typeName )
-    in
     if package == ImplicitImports.elmCorePackage then
         case argTypes of
             [] ->
@@ -774,7 +769,7 @@ fromTypedNotDirectlyCollapsible typeAliases package moduleId typeName argTypes =
                 }
 
         Just alias_ ->
-            case List.ExtraExtra.map2OrNothingIfLengthsDiffer alias_.args argTypes of
+            case List.ExtraExtra.zipOrNothingIfLengthsDiffer alias_.args argTypes of
                 {- Imagine:
 
                    type alias Pair first second =
@@ -1775,13 +1770,6 @@ expandAliasAndCollapseHelp fuel typeAliases type_ =
             type_
 
 
-{-| Like `expandAliasAndCollapse` but from a known UserDefinedType
--}
-userDefinedTypeExpandAliasAndCollapse : TypeAliases -> { package : PackageName, moduleId : ModuleId, name : VarName, args : List MonoType } -> MonoType
-userDefinedTypeExpandAliasAndCollapse typeAliases utMaybeAliased =
-    userDefinedTypeExpandAliasAndCollapseHelp maxAliasDepth typeAliases utMaybeAliased
-
-
 userDefinedTypeExpandAliasAndCollapseHelp : Int -> TypeAliases -> { package : PackageName, moduleId : ModuleId, name : VarName, args : List MonoType } -> MonoType
 userDefinedTypeExpandAliasAndCollapseHelp fuel typeAliases ut =
     if fuel <= 0 then
@@ -1851,7 +1839,7 @@ userDefinedTypeExpandAliasAndCollapseHelp fuel typeAliases ut =
                 UserDefinedType ut
 
             Just alias_ ->
-                case List.ExtraExtra.map2OrNothingIfLengthsDiffer alias_.args ut.args of
+                case List.ExtraExtra.zipOrNothingIfLengthsDiffer alias_.args ut.args of
                     {- Imagine:
 
                        type alias Pair first second =
@@ -1897,7 +1885,7 @@ expandAliasDeepHelp fuel typeAliases type_ =
                         expandDeepChildren fuel typeAliases type_
 
                     Just alias_ ->
-                        case List.ExtraExtra.map2OrNothingIfLengthsDiffer alias_.args ut.args of
+                        case List.ExtraExtra.zipOrNothingIfLengthsDiffer alias_.args ut.args of
                             Nothing ->
                                 expandDeepChildren fuel typeAliases type_
 
