@@ -223,7 +223,9 @@ inferNodes nodes (Project p) =
     let
         newAcc : ProjectAcc
         newAcc =
-            SCC.stronglyConnectedComponents (Set.toList nodes) (\node -> firstPartyImportsOf p.modulesById node)
+            SCC.stronglyConnectedComponents
+                (Set.toList nodes)
+                (\node -> firstPartyImportsOf p.modulesById node)
                 |> List.foldl
                     (\list acc ->
                         List.foldl
@@ -762,9 +764,6 @@ dependencyPackageEnv :
     -> TypeAliases
     -> StateM ( TypeAliases, ModuleIds.Mapping )
 dependencyPackageEnv pkgName pkg deps sourcesToResolveAmbiguity accModuleMapping accTypeAliases =
-    -- TODO this assumes that all source files of a dependency
-    -- which needs source files are visited.
-    -- I think this assumption is wrong!
     let
         addModule : PackageName -> Elm.Docs.Module -> Dict String (List PackageName) -> Dict String (List PackageName)
         addModule modulePkgName mod acc =
@@ -918,13 +917,6 @@ dependencyPackageEnv pkgName pkg deps sourcesToResolveAmbiguity accModuleMapping
 
                             Just moduleId ->
                                 let
-                                    toError : ErrorDetails -> Error
-                                    toError details =
-                                        { moduleName = ModuleNameExtra.fromDotted mod.name
-                                        , declarationNames = []
-                                        , details = details
-                                        }
-
                                     addBinding :
                                         TypeAliases
                                         -> VarName
@@ -932,8 +924,12 @@ dependencyPackageEnv pkgName pkg deps sourcesToResolveAmbiguity accModuleMapping
                                         -> StateM ()
                                     addBinding typeAliases name tipe =
                                         case fromDocsType moduleNameOriginDependencyResolver typeAliases tipe of
-                                            Err error ->
-                                                State.error (toError error)
+                                            Err details ->
+                                                State.error
+                                                    { moduleName = ModuleNameExtra.fromDotted mod.name
+                                                    , declarationNames = []
+                                                    , details = details
+                                                    }
 
                                             Ok monoType ->
                                                 State.addGlobalBinding ( moduleId, pkgName, name ) (TypeI.closeOver monoType)
