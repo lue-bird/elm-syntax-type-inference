@@ -964,7 +964,7 @@ dependencyPackageEnv pkgName pkg deps sourcesToResolveAmbiguity accModuleMapping
                                         mod.unions
                                     )
                                 <| \() ->
-                                if pkgName == ImplicitImports.elmCorePackage then
+                                if ModuleIds.equal moduleId ModuleIds.basicsId then
                                     -- overwrite types of True and False, the only 2 variants where the result is not a UserDefinedType
                                     State.do
                                         (State.addGlobalBinding
