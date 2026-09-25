@@ -663,12 +663,12 @@ fromTyped typeAliases package moduleId typeName argTypes =
                             Bool
 
                         _ ->
-                            UserDefinedType
-                                { package = package
-                                , moduleId = moduleId
-                                , name = typeName
-                                , args = []
-                                }
+                            fromTypedNotDirectlyCollapsible
+                                typeAliases
+                                package
+                                moduleId
+                                typeName
+                                argTypes
 
                 else if ModuleIds.equal moduleId ModuleIds.charId && typeName == "Char" then
                     Char
@@ -677,25 +677,24 @@ fromTyped typeAliases package moduleId typeName argTypes =
                     String
 
                 else
-                    UserDefinedType
-                        { package = package
-                        , moduleId = moduleId
-                        , name = typeName
-                        , args = []
-                        }
+                    fromTypedNotDirectlyCollapsible
+                        typeAliases
+                        package
+                        moduleId
+                        typeName
+                        argTypes
 
             [ innerType ] ->
                 if ModuleIds.equal moduleId ModuleIds.listId && typeName == "List" then
                     List innerType
 
                 else
-                    -- assumes no type aliases are defined in module List
-                    UserDefinedType
-                        { package = package
-                        , moduleId = moduleId
-                        , name = typeName
-                        , args = [ innerType ]
-                        }
+                    fromTypedNotDirectlyCollapsible
+                        typeAliases
+                        package
+                        moduleId
+                        typeName
+                        argTypes
 
             _ ->
                 fromTypedNotDirectlyCollapsible
