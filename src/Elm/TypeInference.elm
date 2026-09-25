@@ -695,11 +695,26 @@ dependencyEnv { directDependencies, allDependencies, sourcesToResolveAmbiguity }
                     )
             baseEnv =
                 (State.do
-                    (deps
-                        |> Dict.toList
+                    (SCC.stronglyConnectedComponents
+                        (Dict.keys deps)
+                        (\pkgName ->
+                            case Dict.get pkgName deps of
+                                Nothing ->
+                                    []
+
+                                Just pkg ->
+                                    pkg.dependencies
+                        )
+                        -- TODO use nested fold instead
+                        |> List.concat
                         |> State.foldl
-                            (\( pkgName, pkg ) ( accTypeAliases, accModuleMapping ) ->
-                                dependencyPackageEnv pkgName pkg deps sourcesToResolveAmbiguity accModuleMapping accTypeAliases
+                            (\pkgName ( accTypeAliases, accModuleMapping ) ->
+                                case Dict.get pkgName deps of
+                                    Just pkg ->
+                                        dependencyPackageEnv pkgName pkg deps sourcesToResolveAmbiguity accModuleMapping accTypeAliases
+
+                                    Nothing ->
+                                        State.pure ( accTypeAliases, accModuleMapping )
                             )
                             ( Dict.empty, moduleMapping2 )
                     )
