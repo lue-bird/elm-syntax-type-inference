@@ -223,11 +223,11 @@ inferNodes nodes (Project p) =
     let
         newAcc : ProjectAcc
         newAcc =
-            SCC.setStronglyConnectedComponents nodes
+            SCC.setStronglyConnectedComponentsFastAndReverse nodes
                 (\node -> firstPartyImportsOf p.modulesById node)
-                |> List.foldl
+                |> List.foldr
                     (\list acc ->
-                        List.foldl
+                        List.foldr
                             (\id subAcc ->
                                 if Dict.member id p.acc.interfaces then
                                     subAcc

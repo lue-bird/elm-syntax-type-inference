@@ -1,4 +1,4 @@
-module Elm.TypeInference.SCC exposing (dictKeysStronglyConnectedComponents, setStronglyConnectedComponents, stronglyConnectedComponents)
+module Elm.TypeInference.SCC exposing (dictKeysStronglyConnectedComponents, setStronglyConnectedComponentsFastAndReverse, stronglyConnectedComponents)
 
 {-| Strongly Connected Components (Tarjan's algorithm)
 
@@ -58,7 +58,7 @@ Mutually recursive bindings must be solved together:
 --> [ [ "isOdd", "isEven" ] ]
 
 If you don't have the set of nodes as a List,
-use `setStronglyConnectedComponents` or `dictKeysStronglyConnectedComponents`
+use `dictKeysStronglyConnectedComponents` or `setStronglyConnectedComponentsFastAndReverse`
 
 -}
 stronglyConnectedComponents :
@@ -74,19 +74,20 @@ stronglyConnectedComponents nodes edges =
     List.reverse finalAcc.sccs
 
 
-{-| See `stronglyConnectedComponents`
+{-| See `stronglyConnectedComponents`.
+Faster than `stronglyConnectedComponents` but returns the list in opposite order
 -}
-setStronglyConnectedComponents :
+setStronglyConnectedComponentsFastAndReverse :
     Set comparable
     -> (comparable -> List comparable)
     -> List (List comparable)
-setStronglyConnectedComponents nodes edges =
+setStronglyConnectedComponentsFastAndReverse nodes edges =
     let
         finalAcc : Acc comparable
         finalAcc =
             Set.foldl (\node acc -> visit edges node acc) initAcc nodes
     in
-    List.reverse finalAcc.sccs
+    finalAcc.sccs
 
 
 {-| See `stronglyConnectedComponents`
