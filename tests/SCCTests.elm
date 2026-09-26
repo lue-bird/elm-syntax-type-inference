@@ -109,7 +109,7 @@ namedGraphEdges graph name =
 namedGraphNodes : NamedGraph -> List String
 namedGraphNodes graph =
     graph
-        |> List.ExtraExtra.fastConcatMap (\( n, edgesFromN ) -> n :: edgesFromN)
+        |> List.concatMap (\( n, edgesFromN ) -> n :: edgesFromN)
         |> Set.fromList
         |> Set.toList
 
@@ -277,7 +277,7 @@ suite =
                     violations : List ( Int, Int )
                     violations =
                         nodesOf graph
-                            |> List.ExtraExtra.fastConcatMap
+                            |> List.concatMap
                                 (\from ->
                                     edgesOf graph from
                                         |> List.filterMap
@@ -352,7 +352,7 @@ suite =
                     wronglySplit : List ( Int, Int )
                     wronglySplit =
                         nodes
-                            |> List.ExtraExtra.fastConcatMap
+                            |> List.concatMap
                                 (\u ->
                                     let
                                         reachableFromU : Set Int

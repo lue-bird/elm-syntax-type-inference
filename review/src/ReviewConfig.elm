@@ -61,4 +61,5 @@ config =
 
     -- custom
     , NoSlowConcat.rule
+        |> Rule.ignoreErrorsForDirectories [ "tests/" ]
     ]

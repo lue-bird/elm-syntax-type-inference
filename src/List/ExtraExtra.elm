@@ -1,4 +1,4 @@
-module List.ExtraExtra exposing (fastConcatMap, fastConcatMapWithInitial, findLastMap, zipOrNothingIfLengthsDiffer)
+module List.ExtraExtra exposing (findLastMap, zipOrNothingIfLengthsDiffer)
 
 {-| -}
 
@@ -18,22 +18,6 @@ findLastMap toMaybeFound list =
                         toMaybeFound el
             )
             Nothing
-
-
-{-| This particular variant doesn't preserve the order like List.concatMap would, but it's marginally faster. We've adjusted the code using it.
-
-<https://github.com/jfmengels/elm-benchmarks/blob/main/src/ListOrderingExploration/ListConcatMap.elm>
-<https://github.com/jfmengels/elm-benchmarks/blob/main/src/ListOrderingExploration/ListConcatMap-Results-Chrome.png>
-
--}
-fastConcatMap : (a -> List b) -> List a -> List b
-fastConcatMap fn list =
-    fastConcatMapWithInitial fn list []
-
-
-fastConcatMapWithInitial : (a -> List b) -> List a -> List b -> List b
-fastConcatMapWithInitial fn list initial =
-    List.foldr (\item acc -> fn item ++ acc) initial list
 
 
 zipOrNothingIfLengthsDiffer : List a -> List b -> Maybe (List ( a, b ))
