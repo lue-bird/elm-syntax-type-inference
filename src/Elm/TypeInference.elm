@@ -70,7 +70,6 @@ import Elm.TypeInference.Type exposing (PackageName, VarName)
 import Elm.TypeInference.Type.Internal as TypeI exposing (MonoType(..), TypeResolver)
 import Elm.TypeInference.TypeVar as TypeVar
 import Elm.TypeInference.Unify exposing (TypeAlias)
-import List.ExtraExtra
 import RangeLike
 import Result.Extra
 import Result.ExtraExtra
@@ -650,24 +649,38 @@ dependencyEnv { directDependencies, allDependencies, sourcesToResolveAmbiguity }
     in
     if Dict.isEmpty needed then
         let
-            depModuleNames : List FullModuleName
-            depModuleNames =
-                (allDependencies
-                    |> List.ExtraExtra.fastConcatMap (\pkg -> List.map (\m -> FullModuleName.fromDotted m.name) pkg.modules)
-                )
-                    ++ (DependencySources.referencedModules deps
-                            |> List.map FullModuleName.fromDotted
-                       )
-
             directVisibleDeps : Dependencies
             directVisibleDeps =
                 allDependencies
-                    |> List.filter (\pkg -> List.member pkg.name directDependencies)
-                    |> Dependencies.fromList
+                    |> List.foldl
+                        (\pkg acc ->
+                            if List.member pkg.name directDependencies then
+                                Dict.insert pkg.name pkg acc
+
+                            else
+                                acc
+                        )
+                        Dict.empty
 
             moduleMapping0 : ModuleIds.Mapping
             moduleMapping0 =
-                List.foldl (\name acc -> ModuleIds.intern name acc |> Tuple.second) ModuleIds.empty depModuleNames
+                allDependencies
+                    |> List.foldl
+                        (\pkg acrossDependencies ->
+                            List.foldl
+                                (\m acc ->
+                                    ModuleIds.intern (FullModuleName.fromDotted m.name) acc |> Tuple.second
+                                )
+                                acrossDependencies
+                                pkg.modules
+                        )
+                        (List.foldl
+                            (\name acc ->
+                                ModuleIds.intern (FullModuleName.fromDotted name) acc |> Tuple.second
+                            )
+                            ModuleIds.empty
+                            (DependencySources.referencedModules deps)
+                        )
 
             ( depIndex, moduleMapping1 ) =
                 ModuleLookup.buildIndex moduleMapping0 directVisibleDeps
