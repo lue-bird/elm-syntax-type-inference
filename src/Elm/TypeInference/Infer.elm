@@ -16,6 +16,7 @@ See `topLevelMember` (entry point) and `letFunctionMember` (not exposed).
 
 -}
 
+import Array exposing (Array)
 import Dict exposing (Dict)
 import Elm.Syntax.Declaration exposing (Declaration)
 import Elm.Syntax.Expression as Expression exposing (Expression(..), LetDeclaration(..))
@@ -43,6 +44,7 @@ import Elm.TypeInference.Type.Internal as TypeI
         )
 import Elm.TypeInference.TypeEquation as TypeEquation exposing (Equations)
 import Elm.TypeInference.Unify as Unify exposing (TypeAlias)
+import List.Extra
 import Regex exposing (Regex)
 
 
@@ -773,7 +775,12 @@ inferRecordSetters ctx fieldSetters =
                     , TypeEquation.append allEqs eqs
                     )
             )
-            ( Dict.empty, TypeEquation.empty )
+            tupleDictEmptyTypeEquationEmpty
+
+
+tupleDictEmptyTypeEquationEmpty : ( Dict k v, Equations )
+tupleDictEmptyTypeEquationEmpty =
+    ( Dict.empty, TypeEquation.empty )
 
 
 
@@ -789,20 +796,16 @@ Annotated functions are installed before the non-annotated ones' cycle.
 solveLetDeclarations : Ctx -> List (Node LetDeclaration) -> StateM ()
 solveLetDeclarations ctx declarations =
     let
-        indexed : List ( Int, Node LetDeclaration )
-        indexed =
-            List.indexedMap Tuple.pair declarations
-
-        byIndex : Dict Int (Node LetDeclaration)
+        byIndex : Array (Node LetDeclaration)
         byIndex =
-            Dict.fromList indexed
+            Array.fromList declarations
 
         -- name -> index of the declaration binding it
         indexOfName : Dict VarName Int
         indexOfName =
-            indexed
-                |> List.foldl
-                    (\( index, declNode ) accAcrossDecls ->
+            declarations
+                |> List.Extra.indexedFoldl
+                    (\index declNode accAcrossDecls ->
                         case Node.value declNode of
                             LetFunction fn ->
                                 Dict.insert (functionName fn) index accAcrossDecls
@@ -831,7 +834,7 @@ solveLetDeclarations ctx declarations =
 
         isAnnotatedIndex : Int -> Bool
         isAnnotatedIndex index =
-            case Dict.get index byIndex of
+            case Array.get index byIndex of
                 Just letDeclNode ->
                     hasLetAnnotation letDeclNode
 
@@ -849,7 +852,7 @@ solveLetDeclarations ctx declarations =
 
         edges : Int -> List Int
         edges index =
-            case Dict.get index byIndex of
+            case Array.get index byIndex of
                 Nothing ->
                     []
 
@@ -877,7 +880,7 @@ solveLetDeclarations ctx declarations =
 
         sccs : List (List Int)
         sccs =
-            SCC.stronglyConnectedComponents (List.map Tuple.first indexed) edges
+            SCC.stronglyConnectedComponents (List.range 0 (Array.length byIndex - 1)) edges
 
         inferDestructuring : Node LetDeclaration -> Node Pattern -> Node Expression -> StateM ()
         inferDestructuring declNode patternNode exprNode =
@@ -917,7 +920,7 @@ solveLetDeclarations ctx declarations =
                 ( functions, destructurings ) =
                     List.foldr
                         (\declIndex ( fns, dests ) ->
-                            case Dict.get declIndex byIndex of
+                            case Array.get declIndex byIndex of
                                 Nothing ->
                                     ( fns, dests )
 
