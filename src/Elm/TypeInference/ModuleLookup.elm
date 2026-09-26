@@ -669,12 +669,13 @@ dependencyModuleDefinesType (Index index) moduleId typeName =
 
 implicitTypeModule : ModuleName -> VarName -> Maybe ( PackageName, ModuleId )
 implicitTypeModule qualifier typeName =
-    if not (List.isEmpty qualifier) then
-        Nothing
+    case qualifier of
+        _ :: _ ->
+            Nothing
 
-    else
-        ImplicitImports.moduleExposingTypeId typeName
-            |> Maybe.map (\id -> ( ImplicitImports.elmCorePackage, id ))
+        [] ->
+            ImplicitImports.moduleExposingTypeId typeName
+                |> Maybe.map (\id -> ( ImplicitImports.elmCorePackage, id ))
 
 
 {-| A qualifier like `Parser.` can mean two different modules at once:
@@ -768,127 +769,111 @@ qualifierCandidates moduleMapping thisModule qualifier =
 
 
 typeResolverFor : ModuleIds.Mapping -> Index -> Dict ModuleId ModuleIndex -> ModuleIndex -> TypeResolver
-typeResolverFor moduleMapping ((Index index) as wrappedIndex) modules thisModule qualifier typeName =
-    let
-        candidates : List ModuleId
-        candidates =
-            qualifierCandidates moduleMapping thisModule qualifier
+typeResolverFor moduleMapping ((Index index) as wrappedIndex) modules thisModule =
+    \qualifier typeName ->
+        let
+            candidates : List ModuleId
+            candidates =
+                qualifierCandidates moduleMapping thisModule qualifier
 
-        firstParty : ModuleId -> Maybe ( PackageName, ModuleId )
-        firstParty unaliasedId =
-            if ModuleIds.equal unaliasedId thisModule.moduleId && List.isEmpty qualifier then
-                if Set.member typeName thisModule.declaredTypes then
-                    Just ( "", thisModule.moduleId )
+            firstParty : ModuleId -> Maybe ( PackageName, ModuleId )
+            firstParty unaliasedId =
+                if ModuleIds.equal unaliasedId thisModule.moduleId && List.isEmpty qualifier then
+                    if Set.member typeName thisModule.declaredTypes then
+                        Just ( "", thisModule.moduleId )
+
+                    else
+                        thisModule.imports
+                            |> List.ExtraExtra.findLastMap
+                                (\import_ ->
+                                    if not (ModuleIndex.importExposesType import_ typeName) then
+                                        Nothing
+
+                                    else
+                                        case Dict.get import_.moduleId modules of
+                                            Just importedModule ->
+                                                if Set.member typeName importedModule.exposedTypes then
+                                                    Just ( "", import_.moduleId )
+
+                                                else
+                                                    Nothing
+
+                                            Nothing ->
+                                                dependencyModuleDefinesType wrappedIndex import_.moduleId typeName
+                                )
 
                 else
-                    thisModule.imports
-                        |> List.ExtraExtra.findLastMap
-                            (\import_ ->
-                                if not (ModuleIndex.importExposesType import_ typeName) then
-                                    Nothing
+                    Dict.get unaliasedId modules
+                        |> Maybe.andThen
+                            (\moduleIndex ->
+                                if Set.member typeName moduleIndex.exposedTypes then
+                                    Just ( "", unaliasedId )
 
                                 else
-                                    case Dict.get import_.moduleId modules of
-                                        Just importedModule ->
-                                            if Set.member typeName importedModule.exposedTypes then
-                                                Just ( "", import_.moduleId )
-
-                                            else
-                                                Nothing
-
-                                        Nothing ->
-                                            dependencyModuleDefinesType wrappedIndex import_.moduleId typeName
+                                    Nothing
                             )
 
-            else
-                Dict.get unaliasedId modules
-                    |> Maybe.andThen
-                        (\moduleIndex ->
-                            if Set.member typeName moduleIndex.exposedTypes then
-                                Just ( "", unaliasedId )
+            maybeResolved : Maybe (Result ResolverAmbiguity ( PackageName, ModuleId ))
+            maybeResolved =
+                candidates
+                    |> List.Extra.findMap
+                        (\candidate ->
+                            case firstParty candidate of
+                                Just done ->
+                                    Just (Ok done)
 
-                            else
-                                Nothing
+                                Nothing ->
+                                    if ModuleIds.equal candidate thisModule.moduleId && List.isEmpty qualifier then
+                                        Nothing
+
+                                    else
+                                        let
+                                            matchingPackages : List PackageName
+                                            matchingPackages =
+                                                ownersOf index.types candidate typeName
+                                        in
+                                        case matchingPackages of
+                                            [] ->
+                                                Nothing
+
+                                            [ single ] ->
+                                                Just (Ok ( single, candidate ))
+
+                                            _ :: _ :: _ ->
+                                                Just
+                                                    (Err
+                                                        { moduleName = moduleIdToString moduleMapping candidate
+                                                        , possiblePackages = matchingPackages
+                                                        }
+                                                    )
                         )
+        in
+        case maybeResolved of
+            Just resolved ->
+                resolved
 
-        dependency : ModuleId -> Result ResolverAmbiguity (Maybe ( PackageName, ModuleId ))
-        dependency unaliasedId =
-            if ModuleIds.equal unaliasedId thisModule.moduleId && List.isEmpty qualifier then
-                Ok Nothing
-
-            else
-                let
-                    matchingPackages : List PackageName
-                    matchingPackages =
-                        ownersOf index.types unaliasedId typeName
-                in
-                case matchingPackages of
-                    [] ->
-                        Ok Nothing
-
-                    [ single ] ->
-                        Ok (Just ( single, unaliasedId ))
-
-                    _ :: _ :: _ ->
-                        Err
-                            { moduleName = moduleIdToString moduleMapping unaliasedId
-                            , possiblePackages = matchingPackages
-                            }
-    in
-    candidates
-        |> List.Extra.findMap
-            (\candidate ->
-                case firstParty candidate of
-                    (Just _) as done ->
-                        Just (Ok done)
-
-                    Nothing ->
-                        case dependency candidate of
-                            Ok Nothing ->
-                                Nothing
-
-                            done ->
-                                Just done
-            )
-        |> Maybe.withDefault (Ok Nothing)
-        |> Result.map
-            (\resolved ->
-                case resolved of
-                    (Just _) as justFound ->
-                        justFound
-
-                    Nothing ->
-                        implicitTypeModule qualifier typeName
-            )
-        |> Result.andThen
-            (\maybeFound ->
-                case maybeFound of
+            Nothing ->
+                case implicitTypeModule qualifier typeName of
                     Just found ->
                         Ok found
 
                     Nothing ->
-                        let
-                            defaultId : Result ResolverAmbiguity ModuleId
-                            defaultId =
-                                case candidates of
-                                    head :: _ ->
-                                        Ok head
+                        case candidates of
+                            head :: _ ->
+                                Ok ( "", head )
 
-                                    [] ->
-                                        if List.isEmpty qualifier then
-                                            Ok thisModule.moduleId
+                            [] ->
+                                if List.isEmpty qualifier then
+                                    Ok ( "", thisModule.moduleId )
 
-                                        else
-                                            case ModuleIds.getId (FullModuleName.fromModuleName_ qualifier) moduleMapping of
-                                                Just lid ->
-                                                    Ok lid
+                                else
+                                    case ModuleIds.getId (FullModuleName.fromModuleName_ qualifier) moduleMapping of
+                                        Just lid ->
+                                            Ok ( "", lid )
 
-                                                Nothing ->
-                                                    -- Unknown qualifier (not imported/implicit/interned).
-                                                    Err
-                                                        { moduleName = String.join "." qualifier
-                                                        , possiblePackages = []
-                                                        }
-                        in
-                        Result.map (\id -> ( "", id )) defaultId
-            )
+                                        Nothing ->
+                                            -- Unknown qualifier (not imported/implicit/interned).
+                                            Err
+                                                { moduleName = String.join "." qualifier
+                                                , possiblePackages = []
+                                                }
