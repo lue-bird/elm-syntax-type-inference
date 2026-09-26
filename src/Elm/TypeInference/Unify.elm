@@ -99,9 +99,7 @@ typeMismatch : UnifyConfig -> MonoType -> MonoType -> StateM ()
 typeMismatch cfg t1 t2 =
     let
         ( pubT1, pubT2 ) =
-            TypeI.normalizeAndToPublicPair cfg.moduleMapping
-                (TypeI.expandAliasDeep cfg.typeAliases t1)
-                (TypeI.expandAliasDeep cfg.typeAliases t2)
+            TypeI.normalizeAndToPublicPair cfg.moduleMapping t1 t2
     in
     State.error
         { moduleName = FullModuleName.toModuleName cfg.moduleName
@@ -669,17 +667,12 @@ bind cfg typeVar type_ =
                 let
                     ( _, super ) =
                         typeVar
-
-                    typeExpanded : MonoType
-                    typeExpanded =
-                        -- TODO don't expand once normalizeAndToPublicType has been changed
-                        TypeI.expandAliasAndCollapse cfg.typeAliases type_
                 in
-                if accepts super typeExpanded then
+                if accepts super type_ then
                     State.modifySubst
                         (\subst ->
                             SubstitutionMap.bindRoot typeVar
-                                typeExpanded
+                                type_
                                 subst
                         )
 
@@ -688,7 +681,7 @@ bind cfg typeVar type_ =
                         ( pubVar, pubType ) =
                             TypeI.normalizeAndToPublicPair cfg.moduleMapping
                                 (TypeVar typeVar)
-                                typeExpanded
+                                type_
                     in
                     State.error
                         { moduleName = FullModuleName.toModuleName cfg.moduleName

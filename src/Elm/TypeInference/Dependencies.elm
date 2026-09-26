@@ -2,7 +2,9 @@ module Elm.TypeInference.Dependencies exposing
     ( Dependencies
     , DependencyPackage
     , Resolver
+    , addDocsModuleRefNamesToList
     , addDocsModuleRefsToList
+    , addDocsTypeRefsWithSameModuleNameToList
     , fromList
     )
 
@@ -152,6 +154,38 @@ addDocsModuleRefsToList mod accAcrossModules =
            )
 
 
+addDocsModuleRefNamesToList : Elm.Docs.Module -> List String -> List String
+addDocsModuleRefNamesToList mod accAcrossModules =
+    List.foldl (\value acc -> acc |> addDocsTypeRefNamesToList value.tipe)
+        accAcrossModules
+        mod.values
+        |> (\acc ->
+                List.foldl
+                    (\binop accAcrossBinops -> accAcrossBinops |> addDocsTypeRefNamesToList binop.tipe)
+                    acc
+                    mod.binops
+           )
+        |> (\acc ->
+                List.foldl
+                    (\union accAcrossUnions ->
+                        List.foldl
+                            (\( _, payload ) accAcrossPayloads ->
+                                List.foldl addDocsTypeRefNamesToList accAcrossPayloads payload
+                            )
+                            accAcrossUnions
+                            union.tags
+                    )
+                    acc
+                    mod.unions
+           )
+        |> (\acc ->
+                List.foldl
+                    (\typeAlias accAcrossTypeAliases -> addDocsTypeRefNamesToList typeAlias.tipe accAcrossTypeAliases)
+                    acc
+                    mod.aliases
+           )
+
+
 addDocsTypeRefsToList : Elm.Type.Type -> List ( String, String ) -> List ( String, String )
 addDocsTypeRefsToList tipe acc =
     case tipe of
@@ -186,6 +220,92 @@ addDocsTypeRefsToList tipe acc =
         Elm.Type.Record fields _ ->
             List.foldl
                 (\( _, value ) accAcrossFields -> accAcrossFields |> addDocsTypeRefsToList value)
+                acc
+                fields
+
+
+addDocsTypeRefNamesToList : Elm.Type.Type -> List String -> List String
+addDocsTypeRefNamesToList tipe acc =
+    case tipe of
+        Elm.Type.Var _ ->
+            acc
+
+        Elm.Type.Lambda from to ->
+            addDocsTypeRefNamesToList from (addDocsTypeRefNamesToList to acc)
+
+        Elm.Type.Tuple parts ->
+            List.foldl addDocsTypeRefNamesToList acc parts
+
+        Elm.Type.Type qualifiedName args ->
+            let
+                ( moduleName, typeName ) =
+                    ModuleNameExtra.splitLastDot qualifiedName
+
+                accAndArgsRefs : List String
+                accAndArgsRefs =
+                    List.foldl addDocsTypeRefNamesToList acc args
+            in
+            -- Skip elm/core stuff
+            if isPrimitiveRef moduleName typeName then
+                accAndArgsRefs
+
+            else if String.isEmpty moduleName then
+                accAndArgsRefs
+
+            else
+                moduleName :: accAndArgsRefs
+
+        Elm.Type.Record fields _ ->
+            List.foldl
+                (\( _, value ) accAcrossFields -> accAcrossFields |> addDocsTypeRefNamesToList value)
+                acc
+                fields
+
+
+addDocsTypeRefsWithSameModuleNameToList : String -> Elm.Type.Type -> List String -> List String
+addDocsTypeRefsWithSameModuleNameToList requestedModuleName tipe acc =
+    case tipe of
+        Elm.Type.Var _ ->
+            acc
+
+        Elm.Type.Lambda from to ->
+            addDocsTypeRefsWithSameModuleNameToList requestedModuleName
+                from
+                (addDocsTypeRefsWithSameModuleNameToList requestedModuleName to acc)
+
+        Elm.Type.Tuple parts ->
+            List.foldl
+                (\part acrossParts ->
+                    addDocsTypeRefsWithSameModuleNameToList requestedModuleName part acrossParts
+                )
+                acc
+                parts
+
+        Elm.Type.Type qualifiedName args ->
+            let
+                ( moduleName, typeName ) =
+                    ModuleNameExtra.splitLastDot qualifiedName
+
+                accAndArgsRefs : List String
+                accAndArgsRefs =
+                    List.foldl
+                        (\arg acrossArgs ->
+                            addDocsTypeRefsWithSameModuleNameToList requestedModuleName arg acrossArgs
+                        )
+                        acc
+                        args
+            in
+            if requestedModuleName == moduleName then
+                typeName :: accAndArgsRefs
+
+            else
+                accAndArgsRefs
+
+        Elm.Type.Record fields _ ->
+            List.foldl
+                (\( _, value ) accAcrossFields ->
+                    accAcrossFields |> addDocsTypeRefsWithSameModuleNameToList requestedModuleName value
+                )
                 acc
                 fields
 

@@ -73,6 +73,7 @@ import Elm.TypeInference.Unify exposing (TypeAlias)
 import List.ExtraExtra
 import RangeLike
 import Result.Extra
+import Result.ExtraExtra
 import Set exposing (Set)
 import TypeLookupTable exposing (TypeLookupTable)
 import TypeLookupTable.Internal
@@ -707,9 +708,7 @@ dependencyEnv { directDependencies, allDependencies, sourcesToResolveAmbiguity }
                                 Just pkg ->
                                     pkg.dependencies
                         )
-                        -- TODO use nested fold instead
-                        |> List.concat
-                        |> State.foldl
+                        |> State.concatAndFoldl
                             (\pkgName ( accTypeAliases, accModuleMapping ) ->
                                 case Dict.get pkgName deps of
                                     Just pkg ->
@@ -893,11 +892,9 @@ dependencyPackageEnv pkgName pkg deps sourcesToResolveAmbiguity accModuleMapping
                             List.map (\import_ -> import_.dottedModuleName) moduleIndex.imports
 
                 Just pkgModule ->
-                    Dependencies.addDocsModuleRefsToList pkgModule [] |> List.map Tuple.first
+                    Dependencies.addDocsModuleRefNamesToList pkgModule []
         )
-        -- TODO foldl nested instead
-        |> List.concat
-        |> State.foldl
+        |> State.concatAndFoldl
             (\modName acrossModulesTypeAliases ->
                 case Dict.get modName pkgDocsModulesDict of
                     Just mod ->
@@ -916,83 +913,17 @@ dependencyPackageEnv pkgName pkg deps sourcesToResolveAmbiguity accModuleMapping
                                     }
 
                             Just moduleId ->
-                                let
-                                    addBinding :
-                                        TypeAliases
-                                        -> VarName
-                                        -> Elm.Type.Type
-                                        -> StateM ()
-                                    addBinding typeAliases name tipe =
-                                        case fromDocsType moduleNameOriginDependencyResolver typeAliases tipe of
-                                            Err details ->
-                                                State.error
-                                                    { moduleName = ModuleNameExtra.fromDotted mod.name
-                                                    , declarationNames = []
-                                                    , details = details
-                                                    }
-
-                                            Ok monoType ->
-                                                State.addGlobalBinding ( moduleId, pkgName, name ) (TypeI.closeOver monoType)
-                                in
-                                State.do
-                                    (case Dict.get modName sourceFileAndModuleIndexByName of
-                                        Just ( sourceFile, thisModule ) ->
-                                            dependencyPackageModuleSourceTypeAliases
-                                                pkgName
-                                                moduleMapping1
-                                                moduleOriginLookupIndex
-                                                sourceFileModuleIndexByModuleId
-                                                thisModule
-                                                sourceFile
-                                                acrossModulesTypeAliases
-                                                |> State.fromResult
-
-                                        Nothing ->
-                                            mod.aliases
-                                                |> State.foldl
-                                                    (\typeAlias acc ->
-                                                        State.map
-                                                            (\maybeRegisteredTypeAlias ->
-                                                                case maybeRegisteredTypeAlias of
-                                                                    Nothing ->
-                                                                        acc
-
-                                                                    Just ( typeAliasKey, registeredTypeAlias ) ->
-                                                                        Dict.insert typeAliasKey registeredTypeAlias acc
-                                                            )
-                                                            (registerDocsAlias pkgName moduleId mod.name moduleNameOriginDependencyResolver typeAlias acc)
-                                                    )
-                                                    acrossModulesTypeAliases
-                                    )
-                                <| \typeAliasesIncludingMod ->
-                                State.do (State.traverseUnit (\v -> addBinding typeAliasesIncludingMod v.name v.tipe) mod.values) <| \() ->
-                                State.do (State.traverseUnit (\b -> addBinding typeAliasesIncludingMod b.name b.tipe) mod.binops) <| \() ->
-                                State.do
-                                    (State.traverseUnit
-                                        (\union ->
-                                            registerDocsUnion pkgName moduleId mod.name moduleNameOriginDependencyResolver typeAliasesIncludingMod union
-                                        )
-                                        mod.unions
-                                    )
-                                <| \() ->
-                                if ModuleIds.equal moduleId ModuleIds.basicsId then
-                                    -- overwrite types of True and False, the only 2 variants where the result is not a UserDefinedType
-                                    State.do
-                                        (State.addGlobalBinding
-                                            ( ModuleIds.basicsId, ImplicitImports.elmCorePackage, "True" )
-                                            (TypeI.closeOver TypeI.Bool)
-                                        )
-                                    <| \() ->
-                                    State.do
-                                        (State.addGlobalBinding
-                                            ( ModuleIds.basicsId, ImplicitImports.elmCorePackage, "False" )
-                                            (TypeI.closeOver TypeI.Bool)
-                                        )
-                                    <| \() ->
-                                    State.pure typeAliasesIncludingMod
-
-                                else
-                                    State.pure typeAliasesIncludingMod
+                                dependencyPackageModuleEnv
+                                    pkgName
+                                    moduleId
+                                    modName
+                                    mod
+                                    moduleMapping1
+                                    moduleNameOriginDependencyResolver
+                                    moduleOriginLookupIndex
+                                    sourceFileAndModuleIndexByName
+                                    sourceFileModuleIndexByModuleId
+                                    acrossModulesTypeAliases
 
                     Nothing ->
                         case Dict.get modName sourceFileAndModuleIndexByName of
@@ -1012,6 +943,124 @@ dependencyPackageEnv pkgName pkg deps sourcesToResolveAmbiguity accModuleMapping
             )
             accTypeAliases
         |> State.map (\aliases -> ( aliases, moduleMapping1 ))
+
+
+dependencyPackageModuleEnv :
+    PackageName
+    -> ModuleId
+    -> String
+    -> Elm.Docs.Module
+    -> ModuleIds.Mapping
+    -> Dependencies.Resolver
+    -> ModuleLookup.Index
+    -> Dict String ( File, ModuleIndex )
+    -> Dict ModuleId ModuleIndex
+    -> TypeAliases
+    -> State.State
+    -> ( Result Error TypeAliases, State.State )
+dependencyPackageModuleEnv pkgName moduleId modName docsModule moduleMapping1 moduleNameOriginDependencyResolver moduleOriginLookupIndex sourceFileAndModuleIndexByName sourceFileModuleIndexByModuleId acrossModulesTypeAliases =
+    let
+        addBinding :
+            TypeAliases
+            -> VarName
+            -> Elm.Type.Type
+            -> StateM ()
+        addBinding typeAliases name tipe =
+            case fromDocsType moduleNameOriginDependencyResolver typeAliases tipe of
+                Err details ->
+                    State.error
+                        { moduleName = ModuleNameExtra.fromDotted docsModule.name
+                        , declarationNames = []
+                        , details = details
+                        }
+
+                Ok monoType ->
+                    State.addGlobalBinding ( moduleId, pkgName, name ) (TypeI.closeOver monoType)
+    in
+    State.do
+        (case Dict.get modName sourceFileAndModuleIndexByName of
+            Just ( sourceFile, thisModule ) ->
+                -- TODO why do we not need to add global bindings for the public ones
+                -- while non-source docs modules do?
+                -- My(lue-bird) current assumption: Adding any type aliases to global bindings is
+                -- always unnecessary
+                dependencyPackageModuleSourceTypeAliases
+                    pkgName
+                    moduleMapping1
+                    moduleOriginLookupIndex
+                    sourceFileModuleIndexByModuleId
+                    thisModule
+                    sourceFile
+                    acrossModulesTypeAliases
+                    |> State.fromResult
+
+            Nothing ->
+                let
+                    docsAliasDict : Dict String Elm.Docs.Alias
+                    docsAliasDict =
+                        docsModule.aliases
+                            |> List.foldl (\alias -> Dict.insert alias.name alias)
+                                Dict.empty
+                in
+                SCC.stronglyConnectedComponents
+                    (Dict.keys docsAliasDict)
+                    (\aliasName ->
+                        case Dict.get aliasName docsAliasDict of
+                            Nothing ->
+                                []
+
+                            Just alias ->
+                                Dependencies.addDocsTypeRefsWithSameModuleNameToList modName alias.tipe []
+                    )
+                    |> State.concatAndFoldl
+                        (\typeAliasName acc ->
+                            case Dict.get typeAliasName docsAliasDict of
+                                Nothing ->
+                                    State.pure acc
+
+                                Just typeAlias ->
+                                    State.map
+                                        (\maybeRegisteredTypeAlias ->
+                                            case maybeRegisteredTypeAlias of
+                                                Nothing ->
+                                                    acc
+
+                                                Just ( typeAliasKey, registeredTypeAlias ) ->
+                                                    Dict.insert typeAliasKey registeredTypeAlias acc
+                                        )
+                                        (registerDocsAlias pkgName moduleId docsModule.name moduleNameOriginDependencyResolver typeAlias acc)
+                        )
+                        acrossModulesTypeAliases
+        )
+    <| \typeAliasesIncludingMod ->
+    State.do (State.traverseUnit (\v -> addBinding typeAliasesIncludingMod v.name v.tipe) docsModule.values) <| \() ->
+    State.do (State.traverseUnit (\b -> addBinding typeAliasesIncludingMod b.name b.tipe) docsModule.binops) <| \() ->
+    State.do
+        (State.traverseUnit
+            (\union ->
+                registerDocsUnion pkgName moduleId docsModule.name moduleNameOriginDependencyResolver typeAliasesIncludingMod union
+            )
+            docsModule.unions
+        )
+    <| \() ->
+    if ModuleIds.equal moduleId ModuleIds.basicsId then
+        -- overwrite types of True and False, the only 2 variants where the result is not a UserDefinedType
+        State.do
+            (State.addGlobalBinding
+                ( ModuleIds.basicsId, ImplicitImports.elmCorePackage, "True" )
+                (TypeI.closeOver TypeI.Bool)
+            )
+        <| \() ->
+        State.do
+            (State.addGlobalBinding
+                ( ModuleIds.basicsId, ImplicitImports.elmCorePackage, "False" )
+                (TypeI.closeOver TypeI.Bool)
+            )
+        <| \() ->
+        State.pure typeAliasesIncludingMod
+
+    else
+        State.pure typeAliasesIncludingMod
 
 
 dependencyPackageModuleSourceTypeAliases :
@@ -1066,9 +1115,7 @@ dependencyPackageModuleSourceTypeAliases pkgName moduleMapping1 moduleOriginLook
                         thisModule.moduleId
                         (Node.value alias_.typeAnnotation)
         )
-        -- TODO instead foldl on nested lists
-        |> List.concat
-        |> Result.Extra.foldlWhileOk
+        |> Result.ExtraExtra.concatAndFoldl
             (\node dict ->
                 case Dict.get node fileTypeAliases of
                     Just alias_ ->
@@ -1712,9 +1759,7 @@ gatherTypeAliases ctx file =
                         moduleId
                         (Node.value alias_.typeAnnotation)
         )
-        -- TODO instead foldl on nested lists
-        |> List.concat
-        |> State.foldl
+        |> State.concatAndFoldl
             (\node dict ->
                 case Dict.get node fileTypeAliases of
                     Just typeAlias ->

@@ -6,6 +6,7 @@ module Elm.TypeInference.State exposing
     , addGlobalBinding
     , aliasNodeId
     , andThen
+    , concatAndFoldl
     , do
     , empty
     , error
@@ -214,6 +215,14 @@ foldlHelp reduce acc list state =
 
                 ( Ok b, newState ) ->
                     foldlHelp reduce b rest newState
+
+
+concatAndFoldl : (a -> b -> StateM b) -> b -> List (List a) -> StateM b
+concatAndFoldl reduce initialAcc listOfLists =
+    foldl
+        (\innerList acc -> foldl reduce acc innerList)
+        initialAcc
+        listOfLists
 
 
 {-| Like `State.traverse` but avoids reversing the traversed list at the end,
