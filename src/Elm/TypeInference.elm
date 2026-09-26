@@ -1268,22 +1268,24 @@ fromDocsType resolver typeAliases type_ =
                 (fromDocsType resolver typeAliases from)
                 (fromDocsType resolver typeAliases to)
 
-        Elm.Type.Tuple [] ->
-            Ok Unit
+        Elm.Type.Tuple parts ->
+            case parts of
+                [] ->
+                    Ok Unit
 
-        Elm.Type.Tuple [ a, b ] ->
-            Result.map2 Tuple2
-                (fromDocsType resolver typeAliases a)
-                (fromDocsType resolver typeAliases b)
+                [ a, b ] ->
+                    Result.map2 Tuple2
+                        (fromDocsType resolver typeAliases a)
+                        (fromDocsType resolver typeAliases b)
 
-        Elm.Type.Tuple [ a, b, c ] ->
-            Result.map3 Tuple3
-                (fromDocsType resolver typeAliases a)
-                (fromDocsType resolver typeAliases b)
-                (fromDocsType resolver typeAliases c)
+                [ a, b, c ] ->
+                    Result.map3 Tuple3
+                        (fromDocsType resolver typeAliases a)
+                        (fromDocsType resolver typeAliases b)
+                        (fromDocsType resolver typeAliases c)
 
-        Elm.Type.Tuple _ ->
-            Err (ImpossibleDocsType type_)
+                _ ->
+                    Err (ImpossibleDocsType type_)
 
         Elm.Type.Type qualifiedName args ->
             let
@@ -1297,18 +1299,19 @@ fromDocsType resolver typeAliases type_ =
                 (resolver moduleNameStr)
                 (Result.Extra.combineMap (\arg -> fromDocsType resolver typeAliases arg) args)
 
-        Elm.Type.Record fields Nothing ->
-            dictFromDocsFields resolver typeAliases fields
-                |> Result.map Record
-
-        Elm.Type.Record fields (Just rowVar) ->
+        Elm.Type.Record fields extended ->
             dictFromDocsFields resolver typeAliases fields
                 |> Result.map
-                    (\resolvedFields ->
-                        ExtensibleRecord
-                            { extensionTypevar = TypeVar (TypeVar.parse rowVar)
-                            , fields = resolvedFields
-                            }
+                    (case extended of
+                        Nothing ->
+                            Record
+
+                        Just rowVar ->
+                            \resolvedFields ->
+                                ExtensibleRecord
+                                    { extensionTypevar = TypeVar (TypeVar.parse rowVar)
+                                    , fields = resolvedFields
+                                    }
                     )
 
 
