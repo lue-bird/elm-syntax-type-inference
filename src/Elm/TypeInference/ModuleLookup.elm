@@ -112,7 +112,9 @@ valueNamesOf mod =
 
 typeNamesOf : Elm.Docs.Module -> List VarName
 typeNamesOf mod =
-    List.map .name mod.unions ++ List.map .name mod.aliases
+    mod.unions
+        |> List.foldl (\union acc -> union.name :: acc)
+            (List.map .name mod.aliases)
 
 
 addCtorParents : ModuleId -> Elm.Docs.Module -> Dict ModuleId (Dict VarName VarName) -> Dict ModuleId (Dict VarName VarName)
