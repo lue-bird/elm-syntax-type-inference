@@ -3,7 +3,6 @@ module Elm.Syntax.Pattern.Extra exposing (foldVarNames, insertVarNamesIntoSet, v
 import Elm.Syntax.Node as Node
 import Elm.Syntax.Pattern exposing (Pattern(..))
 import Elm.TypeInference.Type exposing (VarName)
-import List.ExtraExtra
 import Set exposing (Set)
 
 
@@ -12,49 +11,65 @@ Prefer `insertVarNamesIntoSet` or `varNamesFold` if you want anything other than
 -}
 varNames : Pattern -> List VarName
 varNames pattern =
+    varNamesInto pattern []
+
+
+varNamesInto : Pattern -> List VarName -> List VarName
+varNamesInto pattern acc =
     case pattern of
         VarPattern var ->
-            [ var ]
+            var :: acc
 
-        --
         AllPattern ->
-            []
+            acc
 
         UnitPattern ->
-            []
+            acc
 
         CharPattern _ ->
-            []
+            acc
 
         StringPattern _ ->
-            []
+            acc
 
         IntPattern _ ->
-            []
+            acc
 
         HexPattern _ ->
-            []
+            acc
 
         FloatPattern _ ->
-            []
+            acc
 
         TuplePattern patterns ->
-            List.ExtraExtra.fastConcatMap (\(Node.Node _ part) -> varNames part) patterns
+            List.foldl
+                (\(Node.Node _ part) acrossParts -> varNamesInto part acrossParts)
+                acc
+                patterns
 
         RecordPattern fields ->
-            List.map Node.value fields
+            List.foldl
+                (\(Node.Node _ fieldName) acrossFields -> fieldName :: acrossFields)
+                acc
+                fields
 
         UnConsPattern p1 p2 ->
-            varNames (Node.value p1) ++ varNames (Node.value p2)
+            varNamesInto (Node.value p1) (varNamesInto (Node.value p2) acc)
 
         ListPattern patterns ->
-            List.ExtraExtra.fastConcatMap (\(Node.Node _ element) -> varNames element) patterns
+            List.foldl
+                (\(Node.Node _ element) acrossElements -> varNamesInto element acrossElements)
+                acc
+                patterns
 
         NamedPattern _ patterns ->
-            List.ExtraExtra.fastConcatMap (\(Node.Node _ payload) -> varNames payload) patterns
+            List.foldl
+                (\(Node.Node _ payload) acrossPayloads -> varNamesInto payload acrossPayloads)
+                acc
+                patterns
 
         AsPattern p1 name ->
-            Node.value name :: varNames (Node.value p1)
+            varNamesInto (Node.value p1) (Node.value name :: acc)
 
         ParenthesizedPattern p1 ->
             varNames (Node.value p1)
