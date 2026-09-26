@@ -776,26 +776,47 @@ fromTypedNotDirectlyCollapsible typeAliases package moduleId typeName argTypes =
                 }
 
         Just alias_ ->
-            case List.ExtraExtra.zipOrNothingIfLengthsDiffer alias_.args argTypes of
-                {- Imagine:
+            case alias_.args of
+                [] ->
+                    alias_.type_
 
-                   type alias Pair first second =
-                       ( first, second )
+                arg0 :: arg1Up ->
+                    {- We do not use the alias if parameter and argument type count differs.
+                       Imagine:
 
-                   x : Pair Int
-                   x = ( 1, "oops" )
+                       type alias Pair first second =
+                           ( first, second )
 
-                -}
-                Nothing ->
-                    UserDefinedType
-                        { package = package
-                        , moduleId = moduleId
-                        , name = typeName
-                        , args = argTypes
-                        }
+                       x : Pair Int
+                       x = ( 1, "oops" )
 
-                Just mappings ->
-                    substituteAliasArgs mappings alias_.type_
+                    -}
+                    case argTypes of
+                        [] ->
+                            UserDefinedType
+                                { package = package
+                                , moduleId = moduleId
+                                , name = typeName
+                                , args = argTypes
+                                }
+
+                        argType0 :: argType1Up ->
+                            case arg1Up of
+                                [] ->
+                                    substituteAllTypeVariablesWithType argType0 alias_.type_
+
+                                _ :: _ ->
+                                    case List.ExtraExtra.zipOrNothingIfLengthsDiffer arg1Up argType1Up of
+                                        Nothing ->
+                                            UserDefinedType
+                                                { package = package
+                                                , moduleId = moduleId
+                                                , name = typeName
+                                                , args = argTypes
+                                                }
+
+                                        Just mappings1Up ->
+                                            substituteAliasArgs (( arg0, argType0 ) :: mappings1Up) alias_.type_
 
 
 {-| Replace type alias' arguments with the supplied types, verbatim.
@@ -869,6 +890,81 @@ substituteAliasArgs mappings type_ =
                 , uniforms = Dict.map (\_ v -> substituteAliasArgs mappings v) r.uniforms
                 , varyingsExtension = substituteAliasArgs mappings r.varyingsExtension
                 , varyings = Dict.map (\_ v -> substituteAliasArgs mappings v) r.varyings
+                }
+
+
+{-| Replace type alias' arguments with the supplied types, verbatim.
+-}
+substituteAllTypeVariablesWithType : MonoType -> MonoType -> MonoType
+substituteAllTypeVariablesWithType replacementType type_ =
+    case type_ of
+        TypeVar _ ->
+            replacementType
+
+        -- The rest is recursion
+        Function f ->
+            Function
+                { from = substituteAllTypeVariablesWithType replacementType f.from
+                , to = substituteAllTypeVariablesWithType replacementType f.to
+                }
+
+        Int ->
+            type_
+
+        Float ->
+            type_
+
+        Char ->
+            type_
+
+        String ->
+            type_
+
+        Bool ->
+            type_
+
+        List listItemType ->
+            List (substituteAllTypeVariablesWithType replacementType listItemType)
+
+        Unit ->
+            type_
+
+        Tuple2 t1 t2 ->
+            Tuple2
+                (substituteAllTypeVariablesWithType replacementType t1)
+                (substituteAllTypeVariablesWithType replacementType t2)
+
+        Tuple3 t1 t2 t3 ->
+            Tuple3
+                (substituteAllTypeVariablesWithType replacementType t1)
+                (substituteAllTypeVariablesWithType replacementType t2)
+                (substituteAllTypeVariablesWithType replacementType t3)
+
+        Record fields ->
+            Record (Dict.map (\_ v -> substituteAllTypeVariablesWithType replacementType v) fields)
+
+        ExtensibleRecord r ->
+            ExtensibleRecord
+                { extensionTypevar = substituteAllTypeVariablesWithType replacementType r.extensionTypevar
+                , fields = Dict.map (\_ v -> substituteAllTypeVariablesWithType replacementType v) r.fields
+                }
+
+        UserDefinedType r ->
+            UserDefinedType
+                { package = r.package
+                , moduleId = r.moduleId
+                , name = r.name
+                , args = List.map (\arg -> substituteAllTypeVariablesWithType replacementType arg) r.args
+                }
+
+        WebGLShader r ->
+            WebGLShader
+                { attributesExtension = substituteAllTypeVariablesWithType replacementType r.attributesExtension
+                , attributes = Dict.map (\_ v -> substituteAllTypeVariablesWithType replacementType v) r.attributes
+                , uniformsExtension = substituteAllTypeVariablesWithType replacementType r.uniformsExtension
+                , uniforms = Dict.map (\_ v -> substituteAllTypeVariablesWithType replacementType v) r.uniforms
+                , varyingsExtension = substituteAllTypeVariablesWithType replacementType r.varyingsExtension
+                , varyings = Dict.map (\_ v -> substituteAllTypeVariablesWithType replacementType v) r.varyings
                 }
 
 
