@@ -160,32 +160,37 @@ moduleExposingTypeId typeName =
 isImplicitlyImportedModule : ModuleName -> Bool
 isImplicitlyImportedModule qualifier =
     case qualifier of
-        [ "Basics" ] ->
-            True
+        [ qualifierSegment ] ->
+            case qualifierSegment of
+                "Basics" ->
+                    True
 
-        [ "List" ] ->
-            True
+                "List" ->
+                    True
 
-        [ "Maybe" ] ->
-            True
+                "Maybe" ->
+                    True
 
-        [ "Result" ] ->
-            True
+                "Result" ->
+                    True
 
-        [ "String" ] ->
-            True
+                "String" ->
+                    True
 
-        [ "Char" ] ->
-            True
+                "Char" ->
+                    True
 
-        [ "Tuple" ] ->
-            True
+                "Tuple" ->
+                    True
 
-        [ "Debug" ] ->
-            True
+                "Debug" ->
+                    True
 
-        [ "Platform" ] ->
-            True
+                "Platform" ->
+                    True
+
+                _ ->
+                    False
 
         _ ->
             False
