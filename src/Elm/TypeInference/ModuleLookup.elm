@@ -77,17 +77,37 @@ addModule packageName mod ( Index idx, moduleMapping ) =
 valueNamesOf : Elm.Docs.Module -> List VarName
 valueNamesOf mod =
     List.map .name mod.values
-        ++ List.map .name mod.binops
-        ++ List.ExtraExtra.fastConcatMap (\u -> List.map Tuple.first u.tags) mod.unions
-        ++ List.filterMap
-            (\a ->
-                if isRecordAlias a then
-                    Just a.name
+        |> (\acc ->
+                List.foldl
+                    (\binop across -> binop.name :: across)
+                    acc
+                    mod.binops
+           )
+        |> (\acc ->
+                List.foldl
+                    (\u acrossUnions ->
+                        List.foldl
+                            (\( variantName, _ ) acrossVariants ->
+                                variantName :: acrossVariants
+                            )
+                            acrossUnions
+                            u.tags
+                    )
+                    acc
+                    mod.unions
+           )
+        |> (\acc ->
+                List.foldl
+                    (\a across ->
+                        if isRecordAlias a then
+                            a.name :: across
 
-                else
-                    Nothing
-            )
-            mod.aliases
+                        else
+                            across
+                    )
+                    acc
+                    mod.aliases
+           )
 
 
 typeNamesOf : Elm.Docs.Module -> List VarName
