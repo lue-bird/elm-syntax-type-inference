@@ -179,43 +179,46 @@ addReverseEdges index acc =
             acc
 
 
-firstPartyImportsOf : Dict ModuleId ProjectModule -> ModuleId -> List ModuleId
-firstPartyImportsOf modulesById moduleId =
+prependFirstPartyImportsOf : Dict ModuleId ProjectModule -> ModuleId -> List ModuleId -> List ModuleId
+prependFirstPartyImportsOf modulesById moduleId acc =
     case Dict.get moduleId modulesById of
         Nothing ->
-            []
+            acc
 
         Just m ->
             m.index.imports
-                |> List.filterMap
-                    (\import_ ->
+                |> List.foldr
+                    (\import_ acrossImports ->
                         if Dict.member import_.moduleId modulesById then
-                            Just import_.moduleId
+                            import_.moduleId :: acrossImports
 
                         else
-                            Nothing
+                            acrossImports
                     )
+                    acc
 
 
 {-| Every module reachable from `start`, `start` included.
 -}
-importClosure : (ModuleId -> List ModuleId) -> ModuleId -> Set ModuleId
-importClosure edges start =
-    importClosureHelp edges [ start ] Set.empty
+importClosure : (ModuleId -> List ModuleId -> List ModuleId) -> ModuleId -> Set ModuleId
+importClosure prependEdges start =
+    importClosureHelp prependEdges [ start ] Set.empty
 
 
-importClosureHelp : (ModuleId -> List ModuleId) -> List ModuleId -> Set ModuleId -> Set ModuleId
-importClosureHelp edges queue visited =
+importClosureHelp : (ModuleId -> List ModuleId -> List ModuleId) -> List ModuleId -> Set ModuleId -> Set ModuleId
+importClosureHelp prependEdges queue visited =
     case queue of
         [] ->
             visited
 
         node :: rest ->
             if Set.member node visited then
-                importClosureHelp edges rest visited
+                importClosureHelp prependEdges rest visited
 
             else
-                importClosureHelp edges (edges node ++ rest) (Set.insert node visited)
+                importClosureHelp prependEdges
+                    (prependEdges node rest)
+                    (Set.insert node visited)
 
 
 inferNodes : Set ModuleId -> Project -> Project
@@ -224,7 +227,7 @@ inferNodes nodes (Project p) =
         newAcc : ProjectAcc
         newAcc =
             SCC.setStronglyConnectedComponentsFastAndReverse nodes
-                (\node -> firstPartyImportsOf p.modulesById node)
+                (\node -> prependFirstPartyImportsOf p.modulesById node [])
                 |> List.foldr
                     (\list acc ->
                         List.foldr
@@ -280,7 +283,10 @@ inferModule moduleName ((Project p) as proj) =
             let
                 (Project newP) =
                     inferNodes
-                        (importClosure (\modId -> firstPartyImportsOf p.modulesById modId) m.index.moduleId)
+                        (importClosure
+                            (\modId acc -> prependFirstPartyImportsOf p.modulesById modId acc)
+                            m.index.moduleId
+                        )
                         proj
             in
             ( case Dict.get m.key newP.acc.tables of
@@ -353,13 +359,13 @@ invalidate modulesById directlyAffected (Project p) =
         affected : Set ModuleId
         affected =
             importClosureHelp
-                (\id ->
+                (\id tail ->
                     case Dict.get id p.importedBy of
                         Just by ->
-                            Set.toList by
+                            Set.foldl (\byMod acc -> byMod :: acc) tail by
 
                         Nothing ->
-                            []
+                            tail
                 )
                 (Set.toList directlyAffected)
                 Set.empty
