@@ -1019,16 +1019,13 @@ dependencyPackageModuleEnv pkgName moduleId modName docsModule moduleMapping1 mo
                                     State.pure acc
 
                                 Just typeAlias ->
-                                    State.map
-                                        (\maybeRegisteredTypeAlias ->
-                                            case maybeRegisteredTypeAlias of
-                                                Nothing ->
-                                                    acc
-
-                                                Just ( typeAliasKey, registeredTypeAlias ) ->
-                                                    Dict.insert typeAliasKey registeredTypeAlias acc
-                                        )
-                                        (registerDocsAlias pkgName moduleId docsModule.name moduleNameOriginDependencyResolver typeAlias acc)
+                                    docsAliasAddToTypeAliasesAndRegisterConstructor
+                                        pkgName
+                                        moduleId
+                                        docsModule.name
+                                        moduleNameOriginDependencyResolver
+                                        typeAlias
+                                        acc
                         )
                         acrossModulesTypeAliases
         )
@@ -1200,61 +1197,60 @@ registerDocsUnion pkgName moduleId dottedModuleName resolver typeAliases union =
 
 {-| A record type definition gets a constructor function as well
 -}
-registerDocsAlias :
+docsAliasAddToTypeAliasesAndRegisterConstructor :
     PackageName
     -> ModuleId
     -> String
     -> Dependencies.Resolver
     -> Elm.Docs.Alias
     -> TypeAliases
-    -> StateM (Maybe ( ( ModuleId, PackageName, VarName ), TypeAlias ))
-registerDocsAlias pkgName moduleId dottedModuleName resolver alias_ typeAliases =
-    let
-        toError : ErrorDetails -> Error
-        toError details =
-            { moduleName = ModuleNameExtra.fromDotted dottedModuleName
-            , declarationNames = []
-            , details = details
-            }
-    in
-    State.do
-        (State.fromResult
-            (Result.mapError toError
-                (fromDocsType resolver typeAliases alias_.tipe)
-            )
-        )
-    <| \aliasMono ->
-    let
-        registerConstructor : StateM ()
-        registerConstructor =
-            case alias_.tipe of
+    -> StateM TypeAliases
+docsAliasAddToTypeAliasesAndRegisterConstructor pkgName moduleId dottedModuleName resolver docsAlias typeAliases =
+    case fromDocsType resolver typeAliases docsAlias.tipe of
+        Err details ->
+            State.error
+                { moduleName = ModuleNameExtra.fromDotted dottedModuleName
+                , declarationNames = []
+                , details = details
+                }
+
+        Ok aliasMono ->
+            let
+                typeAliasesIncludingThisOne : TypeAliases
+                typeAliasesIncludingThisOne =
+                    Dict.insert ( moduleId, pkgName, docsAlias.name )
+                        { args = List.map TypeVar.parse docsAlias.args, type_ = aliasMono }
+                        typeAliases
+            in
+            case docsAlias.tipe of
                 Elm.Type.Record fields Nothing ->
-                    State.do
-                        (State.fromResult
-                            (Result.mapError toError
-                                (fromDocsFields resolver typeAliases fields)
-                            )
-                        )
-                    <| \resolvedFields ->
-                    let
-                        ctorType : MonoType
-                        ctorType =
-                            List.foldr
-                                (\( _, fieldT ) acc -> Function { from = fieldT, to = acc })
-                                aliasMono
-                                resolvedFields
-                    in
-                    State.addGlobalBinding ( moduleId, pkgName, alias_.name ) (TypeI.closeOver ctorType)
+                    case aliasMono of
+                        TypeI.Record monoFields ->
+                            let
+                                ctorType : MonoType
+                                ctorType =
+                                    List.foldr
+                                        (\( fieldName, _ ) acc ->
+                                            case Dict.get fieldName monoFields of
+                                                Just fieldT ->
+                                                    Function { from = fieldT, to = acc }
+
+                                                Nothing ->
+                                                    -- impossible. If this is reached there is a bug in fromDocsType
+                                                    acc
+                                        )
+                                        aliasMono
+                                        fields
+                            in
+                            State.addGlobalBinding ( moduleId, pkgName, docsAlias.name ) (TypeI.closeOver ctorType)
+                                |> State.map (\() -> typeAliasesIncludingThisOne)
+
+                        _ ->
+                            -- impossible. If this is reached there is a bug in fromDocsType
+                            State.pure typeAliasesIncludingThisOne
 
                 _ ->
-                    State.pureUnit
-    in
-    State.do registerConstructor <| \() ->
-    State.pure <|
-        Just
-            ( ( moduleId, pkgName, alias_.name )
-            , { args = List.map TypeVar.parse alias_.args, type_ = aliasMono }
-            )
+                    State.pure typeAliasesIncludingThisOne
 
 
 fromDocsType :
@@ -1328,20 +1324,6 @@ dictFromDocsFields resolver typeAliases fields =
                 |> Result.map (\valueType -> Dict.insert name valueType acc)
         )
         Dict.empty
-        fields
-
-
-fromDocsFields :
-    Dependencies.Resolver
-    -> TypeAliases
-    -> List ( String, Elm.Type.Type )
-    -> Result ErrorDetails (List ( String, MonoType ))
-fromDocsFields resolver typeAliases fields =
-    Result.Extra.combineMap
-        (\( name, value ) ->
-            fromDocsType resolver typeAliases value
-                |> Result.map (\valueType -> ( name, valueType ))
-        )
         fields
 
 
