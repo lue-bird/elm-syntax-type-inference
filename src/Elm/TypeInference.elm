@@ -223,8 +223,7 @@ inferNodes nodes (Project p) =
     let
         newAcc : ProjectAcc
         newAcc =
-            SCC.stronglyConnectedComponents
-                (Set.toList nodes)
+            SCC.setStronglyConnectedComponents nodes
                 (\node -> firstPartyImportsOf p.modulesById node)
                 |> List.foldl
                     (\list acc ->
@@ -711,8 +710,7 @@ dependencyEnv { directDependencies, allDependencies, sourcesToResolveAmbiguity }
                     )
             baseEnv =
                 (State.do
-                    (SCC.stronglyConnectedComponents
-                        (Dict.keys deps)
+                    (SCC.dictKeysStronglyConnectedComponents deps
                         (\pkgName ->
                             case Dict.get pkgName deps of
                                 Nothing ->
@@ -1015,8 +1013,7 @@ dependencyPackageModuleEnv pkgName moduleId modName docsModule moduleMapping1 mo
                             |> List.foldl (\alias -> Dict.insert alias.name alias)
                                 Dict.empty
                 in
-                SCC.stronglyConnectedComponents
-                    (Dict.keys docsAliasDict)
+                SCC.dictKeysStronglyConnectedComponents docsAliasDict
                     (\aliasName ->
                         case Dict.get aliasName docsAliasDict of
                             Nothing ->
@@ -1112,8 +1109,7 @@ dependencyPackageModuleSourceTypeAliases pkgName moduleMapping1 moduleOriginLook
                     )
                     Dict.empty
     in
-    SCC.stronglyConnectedComponents
-        (fileTypeAliases |> Dict.keys)
+    SCC.dictKeysStronglyConnectedComponents fileTypeAliases
         (\node ->
             case Dict.get node fileTypeAliases of
                 Nothing ->
@@ -1675,7 +1671,7 @@ solveModule ctx typeAliases file =
 
         sccs : List (List VarName)
         sccs =
-            SCC.stronglyConnectedComponents (Dict.keys topLevelFunctions) edges
+            SCC.dictKeysStronglyConnectedComponents topLevelFunctions edges
 
         inferCtx : Infer.Ctx
         inferCtx =
@@ -1744,8 +1740,7 @@ gatherTypeAliases ctx file =
                     )
                     Dict.empty
     in
-    SCC.stronglyConnectedComponents
-        (fileTypeAliases |> Dict.keys)
+    SCC.dictKeysStronglyConnectedComponents fileTypeAliases
         (\node ->
             case Dict.get node fileTypeAliases of
                 Nothing ->
